@@ -93,6 +93,13 @@ interface WeightLog {
   weight: number;
 }
 
+// Singleton global para capturar o evento de instalação antes do componente montar
+let globalDeferredPrompt: any = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  globalDeferredPrompt = e;
+});
+
 const App: React.FC = () => {
   // --- States ---
   const [step, setStep] = useState<number>(0);
@@ -122,7 +129,7 @@ const App: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [hasApiKey, setHasApiKey] = useState(true);
 
-  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(globalDeferredPrompt);
   const [showInstallGuide, setShowInstallGuide] = useState(false);
 
   const [onboardingBirthDate, setOnboardingBirthDate] = useState('');
@@ -334,6 +341,17 @@ const App: React.FC = () => {
       deferredPrompt.prompt();
       const { outcome } = await deferredPrompt.userChoice;
       if (outcome === 'accepted') setDeferredPrompt(null);
+    } else if (navigator.share) {
+      // Fallback para iOS: Abrir menu de compartilhamento para facilitar "Adicionar à Tela de Início"
+      try {
+        await navigator.share({
+          title: 'NutriAmiga IA',
+          text: 'Toque em "Adicionar à Tela de Início" para instalar o app e ter acesso rápido! ✨',
+          url: window.location.href
+        });
+      } catch (e) {
+        setShowInstallGuide(true);
+      }
     } else {
       setShowInstallGuide(true);
     }
@@ -350,9 +368,15 @@ const App: React.FC = () => {
       }
     });
 
+    // Registro do Service Worker para suporte PWA - Usando caminho relativo para evitar erro de origem
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch(console.error);
+    }
+
     const handleBeforeInstallPrompt = (e: any) => {
       e.preventDefault();
       setDeferredPrompt(e);
+      globalDeferredPrompt = e;
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
@@ -688,7 +712,7 @@ const App: React.FC = () => {
                  </button>
                  <button onClick={() => { setMode('suggest'); setStep(9); }} className="bg-violet-500/5 border border-violet-500/10 p-6 rounded-[2.5rem] flex flex-col items-center gap-2 active:bg-violet-500/10 transition-colors">
                     <span className="text-3xl">🧊</span>
-                    <span className="text-[10px) font-black uppercase tracking-widest text-slate-100">O que comer?</span>
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-100">O que comer?</span>
                  </button>
               </div>
             </div>
