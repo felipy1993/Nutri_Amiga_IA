@@ -76,6 +76,33 @@ const App: React.FC = () => {
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isWeightModalOpen, setIsWeightModalOpen] = useState(false);
+
+  // --- Speech Helper ---
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  
+  const speakText = (text: string) => {
+    if ('speechSynthesis' in window) {
+      if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
+        setIsSpeaking(false);
+        return;
+      }
+      
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'pt-BR';
+      // Try to find a female voice if possible
+      const voices = window.speechSynthesis.getVoices();
+      const ptVoice = voices.find(v => v.lang.includes('pt') && (v.name.includes('Google') || v.name.includes('Luciana')));
+      if (ptVoice) utterance.voice = ptVoice;
+      
+      utterance.onend = () => setIsSpeaking(false);
+      utterance.onstart = () => setIsSpeaking(true);
+      
+      window.speechSynthesis.speak(utterance);
+    } else {
+      alert("Seu navegador não suporta áudio.");
+    }
+  };
   const [newWeightInput, setNewWeightInput] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [hasApiKey, setHasApiKey] = useState(true);
@@ -841,7 +868,16 @@ const App: React.FC = () => {
                <div className="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar pb-6">
                  {chatMessages.length === 0 && <div className="text-center py-10 px-6 opacity-40"><p className="text-sm font-medium">Como posso ajudar hoje? 🌸</p></div>}
                  {chatMessages.map((msg, i) => (
-                   <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[85%] p-5 rounded-[2rem] text-sm leading-relaxed ${msg.role === 'user' ? 'bg-rose-600 text-white rounded-br-none' : 'bg-slate-900/60 border border-white/5 text-slate-100 rounded-bl-none shadow-sm'}`}>{msg.text}</div></div>
+                   <div key={i} className={`flex flex-col gap-1 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                      <div className={`max-w-[85%] p-5 rounded-[2rem] text-sm leading-relaxed ${msg.role === 'user' ? 'bg-rose-600 text-white rounded-br-none' : 'bg-slate-900/60 border border-white/5 text-slate-100 rounded-bl-none shadow-sm'}`}>
+                        {msg.text}
+                      </div>
+                      {msg.role === 'model' && (
+                        <button onClick={() => speakText(msg.text)} className="ml-2 bg-white/5 hover:bg-white/10 text-white/50 hover:text-white p-2 rounded-full transition-colors self-start scale-75">
+                          🔊
+                        </button>
+                      )}
+                   </div>
                  ))}
                  <div ref={chatEndRef} />
                </div>
