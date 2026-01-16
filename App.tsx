@@ -350,7 +350,7 @@ const App: React.FC = () => {
     setChatInput('');
     setIsChatting(true);
     try {
-      const prompt = `Conversa atual: ${currentMsgs.map(m => `${m.role}: ${m.text}`).join('\n')}\nResponda como a Nutri IA com carinho e precisão.`;
+      const prompt = `Conversa atual: ${currentMsgs.map(m => `${m.role}: ${m.text}`).join('\n')}\nResponda com carinho e precisão.`;
       const text = await callGemini(prompt);
       setChatMessages(prev => [...prev, { role: 'model', text: text || "..." }]);
     } catch (error) {
@@ -871,7 +871,7 @@ const App: React.FC = () => {
             <span className="text-xl">📅</span>
             <span className="text-[7px] font-black uppercase tracking-tighter">Diário</span>
           </button>
-          <div className="relative -top-10">
+          <div className="relative -top-1">
             <button onClick={() => { setMode('meal'); setMealTypeContext(null); setStep(9); }} className="w-16 h-16 bg-gradient-to-br from-rose-500 to-pink-500 text-white rounded-[1.8rem] flex items-center justify-center font-black text-3xl shadow-xl shadow-rose-500/20 active:scale-90 transition-transform">+</button>
           </div>
           <button onClick={() => setStep(11)} className={`flex flex-col items-center gap-1 transition-colors ${step === 11 ? 'text-rose-400' : 'text-slate-600'}`}>
