@@ -839,7 +839,10 @@ const App: React.FC = () => {
                {feedback && (
                  <div className="bg-slate-900/60 border border-white/5 p-8 rounded-[2.5rem] space-y-6 animate-in fade-in shadow-2xl backdrop-blur-md">
                    <div className="space-y-4">
-                     <div className="flex items-center gap-3"><span className="text-2xl">👩‍⚕️</span><h4 className="text-[10px] font-black uppercase tracking-widest text-rose-400">Nutri IA diz:</h4></div>
+                     <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3"><span className="text-2xl">👩‍⚕️</span><h4 className="text-[10px] font-black uppercase tracking-widest text-rose-400">Nutri IA diz:</h4></div>
+                        <button onClick={() => speakText(feedback || '')} className="bg-white/5 hover:bg-white/10 text-white/50 hover:text-white p-2 rounded-full transition-colors scale-90">🔊</button>
+                      </div>
                      <p className="text-sm font-medium leading-relaxed italic text-slate-200">"{feedback}"</p>
                      <div className="space-y-2 pt-4 border-t border-white/5">
                         <p className="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-2">Detalhes Nutricionais:</p>
