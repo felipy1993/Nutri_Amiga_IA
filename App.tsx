@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { GoogleGenAI } from "@google/genai";
 import { db, auth, googleProvider } from './firebaseConfig';
 import { 
@@ -11,13 +11,25 @@ import {
   User,
   sendPasswordResetEmail
 } from 'firebase/auth';
-import { doc, setDoc, getDoc, collection, onSnapshot, query, orderBy, limit, where } from 'firebase/firestore';
+import { 
+  doc, 
+  setDoc, 
+  getDoc, 
+  collection, 
+  onSnapshot, 
+  query, 
+  where,
+  orderBy,
+  deleteDoc
+} from 'firebase/firestore';
 
-const SYSTEM_INSTRUCTION = `Você é uma Inteligência Artificial que atua como guia alimentar e de saúde diário.
+const SYSTEM_INSTRUCTION = `Você é uma Inteligência Artificial que atua como guia alimentar e de saúde diário (NutriAmiga).
 Seu papel é ajudar pessoas comuns a comerem melhor e se manterem ativas.
 Responda sempre de forma curta, motivadora e humana. Use emojis.
 REGRAS:
-- SEMPRE retorne no final do texto a tag: [STATUS:COR][CALORIES:NUMERO][TYPE:MEAL|EXERCISE]`;
+- Ao analisar uma refeição, seja específica sobre os benefícios ou pontos de atenção.
+- SEMPRE retorne no final do texto a tag: [STATUS:COR][CALORIES:NUMERO][TYPE:MEAL|EXERCISE]
+- STATUS pode ser: VERDE (saudável), AMARELO (moderado), AZUL (treino/proteico).`;
 
 interface UserData {
   name: string;
@@ -54,7 +66,6 @@ const App: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState('');
-  const [resetSent, setResetSent] = useState(false);
   const [isLoggingWithGoogle, setIsLoggingWithGoogle] = useState(false);
 
   // App Core State
@@ -70,7 +81,6 @@ const App: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [inputVal, setInputVal] = useState('');
-  const [mealTypeContext, setMealTypeContext] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [mode, setMode] = useState<'meal' | 'exercise'>('meal');
 
@@ -79,7 +89,7 @@ const App: React.FC = () => {
   const [onboardingWeight, setOnboardingWeight] = useState('');
   const [onboardingHeight, setOnboardingHeight] = useState('');
 
-  // Monitorar Autenticação
+  // 1. Monitorar Autenticação
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       setUser(firebaseUser);
@@ -100,7 +110,7 @@ const App: React.FC = () => {
     return () => unsubscribe();
   }, []);
 
-  // Monitorar Dados (Refeições e Stats)
+  // 2. Monitorar Dados em Tempo Real (Refeições e Stats)
   useEffect(() => {
     if (!user || step < 6) return;
 
@@ -128,21 +138,17 @@ const App: React.FC = () => {
     return () => { unsubMeals(); unsubEx(); unsubStats(); };
   }, [user, step, selectedDate]);
 
+  // Handlers Autenticação
   const handleGoogleLogin = async () => {
     setIsLoggingWithGoogle(true);
     setAuthError('');
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (err: any) {
-      console.error("Erro Firebase Auth:", err.code, err.message);
-      if (err.code === 'auth/popup-blocked') {
-        setAuthError("Pop-up bloqueado pelo navegador. Por favor, habilite-o.");
-      } else if (err.code === 'auth/unauthorized-domain') {
-        setAuthError("Este domínio não está autorizado no Firebase. Adicione localhost/seu domínio no console.");
-      } else if (err.code === 'auth/cancelled-popup-request') {
-        // Usuário fechou o popup, não precisa mostrar erro grande
+      if (err.code === 'auth/unauthorized-domain') {
+        setAuthError(`Domínio não autorizado: ${window.location.hostname}. Adicione-o no console do Firebase.`);
       } else {
-        setAuthError("Não foi possível conectar com o Google. Tente e-mail e senha.");
+        setAuthError("Erro ao entrar com Google. Tente novamente.");
       }
     } finally {
       setIsLoggingWithGoogle(false);
@@ -152,41 +158,22 @@ const App: React.FC = () => {
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
-    if (!email || !password) return setAuthError("Preencha e-mail e senha.");
     try {
       if (isRegistering) await createUserWithEmailAndPassword(auth, email, password);
       else await signInWithEmailAndPassword(auth, email, password);
     } catch (err: any) {
-      if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') setAuthError("Credenciais inválidas.");
-      else if (err.code === 'auth/email-already-in-use') setAuthError("E-mail já cadastrado.");
-      else setAuthError("Ocorreu um erro. Tente novamente.");
+      setAuthError("Dados incorretos ou e-mail já em uso.");
     }
   };
 
   const handleLogout = async () => {
     await signOut(auth);
-    setIsSettingsOpen(false);
     setUserData(null);
     setStep(-1);
-    setActiveTab('home');
+    setIsSettingsOpen(false);
   };
 
-  // Implementação da recuperação de senha via Firebase
-  const handleForgotPassword = async () => {
-    if (!email) {
-      setAuthError("Insira seu e-mail para recuperar a senha.");
-      return;
-    }
-    setAuthError('');
-    try {
-      await sendPasswordResetEmail(auth, email);
-      setResetSent(true);
-      setAuthError("E-mail de recuperação enviado! Verifique sua caixa de entrada.");
-    } catch (err: any) {
-      setAuthError("Erro ao enviar e-mail de recuperação. Verifique o endereço digitado.");
-    }
-  };
-
+  // Handlers Onboarding
   const handleOnboardingSubmit = async () => {
     if (!user) return;
     const weightNum = parseFloat(onboardingWeight) || 70;
@@ -196,7 +183,7 @@ const App: React.FC = () => {
       height: onboardingHeight,
       goal: 'Saúde',
       activityLevel: 'moderado',
-      calorieGoal: Math.round(weightNum * 33), // Cálculo simplificado (33kcal/kg)
+      calorieGoal: Math.round(weightNum * 33),
       onboardingComplete: true
     };
     await setDoc(doc(db, "users", user.uid), data);
@@ -204,15 +191,15 @@ const App: React.FC = () => {
     setStep(6);
   };
 
+  // Handler Registro com IA
   const handleEntryRegistration = async () => {
     if (!inputVal || !user || !userData) return;
     setIsAnalyzing(true);
     try {
-      // Inicializando a API conforme as diretrizes
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       let prompt = mode === 'exercise' 
-        ? `EXERCÍCIO: Fiz "${inputVal}". Peso: ${userData.weight}kg. [STATUS:VERDE][CALORIES:NUM][TYPE:EXERCISE]`
-        : `REGISTRO: Comeu "${inputVal}" no ${mealTypeContext || 'Lanche'}. [STATUS:COR][CALORIES:NUM][TYPE:MEAL]`;
+        ? `EXERCÍCIO: Fiz "${inputVal}". Peso atual: ${userData.weight}kg. [STATUS:VERDE][CALORIES:NUM][TYPE:EXERCISE]`
+        : `REFEIÇÃO: Comi "${inputVal}". [STATUS:COR][CALORIES:NUM][TYPE:MEAL]`;
       
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
@@ -220,7 +207,6 @@ const App: React.FC = () => {
         config: { systemInstruction: SYSTEM_INSTRUCTION }
       });
       
-      // Acessando a propriedade .text corretamente
       const text = response.text || "";
       const cleanedFeedback = text.split('[STATUS:')[0];
       setFeedback(cleanedFeedback);
@@ -231,13 +217,20 @@ const App: React.FC = () => {
 
       const id = Date.now().toString();
       if (mode === 'exercise') {
-        await setDoc(doc(db, "users", user.uid, "exercises", id), { id, date: selectedDate, description: inputVal, caloriesBurned: val || 200 });
+        await setDoc(doc(db, "users", user.uid, "exercises", id), { 
+          id, date: selectedDate, description: inputVal, caloriesBurned: val || 200 
+        });
       } else {
-        let status: 'verde' | 'amarelo' | 'azul' = text.includes('STATUS:AMARELO') ? 'amarelo' : 'verde';
-        await setDoc(doc(db, "users", user.uid, "meals", id), { id, date: selectedDate, type: mealTypeContext || "Lanche", description: inputVal, feedback: cleanedFeedback, status, calories: val || 300 });
+        let status: 'verde' | 'amarelo' | 'azul' = 'verde';
+        if (text.includes('STATUS:AMARELO')) status = 'amarelo';
+        if (text.includes('STATUS:AZUL')) status = 'azul';
+        
+        await setDoc(doc(db, "users", user.uid, "meals", id), { 
+          id, date: selectedDate, type: "Registro", description: inputVal, feedback: cleanedFeedback, status, calories: val || 300 
+        });
       }
     } catch (e) {
-      setFeedback("Ops! Registrei localmente, mas a análise falhou. 🍎");
+      setFeedback("Salvei seu registro! No momento não consegui analisar com detalhes, mas está tudo anotado. 💪");
     } finally {
       setIsAnalyzing(false);
     }
@@ -249,86 +242,62 @@ const App: React.FC = () => {
     await setDoc(doc(db, "users", user.uid, "daily_stats", selectedDate), { water: val }, { merge: true });
   };
 
-  const getWeekDays = () => {
-    const days = [];
-    const today = new Date();
-    for (let i = 0; i < 7; i++) {
-      const d = new Date(today);
-      d.setDate(today.getDate() - i);
-      days.push(d.toISOString().split('T')[0]);
-    }
-    return days;
-  };
+  if (authLoading) return (
+    <div className="flex min-h-screen bg-[#020617] justify-center items-center">
+      <div className="w-12 h-12 border-4 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin"></div>
+    </div>
+  );
 
-  if (authLoading) return <div className="flex min-h-screen bg-[#020617] justify-center items-center"><div className="w-12 h-12 border-4 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin"></div></div>;
-
-  // TELA DE LOGIN
+  // TELA LOGIN
   if (step === -1) {
     return (
       <div className="flex flex-col min-h-screen bg-[#020617] text-white p-8 justify-center items-center relative overflow-hidden">
         <div className="absolute top-[-20%] left-[-20%] w-[120%] h-[70%] bg-emerald-500/10 blur-[150px] rounded-full animate-pulse-slow"></div>
         
-        <div className="w-full max-w-sm space-y-8 z-10 animate-in fade-in duration-700">
-          <div className="text-center space-y-2">
-            <div className="inline-block p-4 bg-emerald-500/10 rounded-3xl mb-4 border border-emerald-500/20 shadow-xl shadow-emerald-500/5">
-                <span className="text-4xl">🥗</span>
+        <div className="w-full max-w-sm space-y-8 z-10 animate-in fade-in duration-1000">
+          <div className="text-center space-y-4">
+            <div className="inline-block p-5 bg-emerald-500/10 rounded-[2rem] border border-emerald-500/20 shadow-2xl shadow-emerald-500/5">
+                <span className="text-5xl">🥗</span>
             </div>
             <h1 className="text-5xl font-black tracking-tighter">Nutri<span className="text-emerald-400">Amiga</span></h1>
-            <p className="text-slate-500 font-bold uppercase tracking-[0.3em] text-[10px]">Sua IA de Saúde Pessoal</p>
+            <p className="text-slate-500 font-bold uppercase tracking-[0.3em] text-[10px]">Evolução com Inteligência</p>
           </div>
 
           <div className="glass-card p-8 rounded-[2.5rem] shadow-2xl space-y-6">
             <form onSubmit={handleEmailAuth} className="space-y-4">
-              <div className="space-y-3">
-                <input 
-                  type="email" 
-                  placeholder="E-mail" 
-                  className="w-full bg-black/40 border border-white/5 p-5 rounded-2xl outline-none focus:border-emerald-500/40 transition-all text-sm"
-                  value={email}
-                  onChange={e => setEmail(e.target.value)}
-                />
-                <input 
-                  type="password" 
-                  placeholder="Senha" 
-                  className="w-full bg-black/40 border border-white/5 p-5 rounded-2xl outline-none focus:border-emerald-500/40 transition-all text-sm"
-                  value={password}
-                  onChange={e => setPassword(e.target.value)}
-                />
-              </div>
-
-              {authError && <div className="bg-red-500/10 border border-red-500/20 p-4 rounded-xl text-red-400 text-[10px] font-black uppercase text-center leading-relaxed">{authError}</div>}
-
-              <button type="submit" className="w-full bg-emerald-500 hover:bg-emerald-400 text-white py-5 rounded-2xl font-black uppercase tracking-widest shadow-lg shadow-emerald-500/20 active:scale-95 transition-all">
-                {isRegistering ? "Criar Conta" : "Entrar"}
+              <input 
+                type="email" placeholder="Seu e-mail" 
+                className="w-full bg-black/40 border border-white/5 p-5 rounded-2xl outline-none focus:border-emerald-500/40 transition-all text-sm"
+                value={email} onChange={e => setEmail(e.target.value)}
+              />
+              <input 
+                type="password" placeholder="Sua senha" 
+                className="w-full bg-black/40 border border-white/5 p-5 rounded-2xl outline-none focus:border-emerald-500/40 transition-all text-sm"
+                value={password} onChange={e => setPassword(e.target.value)}
+              />
+              {authError && <div className="text-[10px] text-red-400 font-black uppercase text-center bg-red-400/10 p-3 rounded-xl">{authError}</div>}
+              <button type="submit" className="w-full bg-emerald-500 py-5 rounded-2xl font-black uppercase tracking-widest shadow-lg shadow-emerald-500/20 active:scale-95 transition-all">
+                {isRegistering ? "Criar Minha Conta" : "Entrar Agora"}
               </button>
             </form>
 
-            <div className="flex justify-between items-center px-2">
-                <button onClick={() => setIsRegistering(!isRegistering)} className="text-[10px] font-black uppercase text-slate-500 hover:text-white transition-colors">
-                    {isRegistering ? "Já tenho conta" : "Cadastrar"}
-                </button>
-                <button onClick={() => handleForgotPassword()} className="text-[10px] font-black uppercase text-slate-500 hover:text-white transition-colors">Recuperar Senha</button>
-            </div>
+            <button onClick={() => setIsRegistering(!isRegistering)} className="w-full text-[10px] font-black uppercase text-slate-500">
+                {isRegistering ? "Já tenho conta" : "Não tem conta? Cadastrar"}
+            </button>
 
-            <div className="relative flex items-center gap-4 text-slate-700">
+            <div className="relative flex items-center gap-4 py-2">
               <div className="flex-1 border-t border-white/5"></div>
-              <span className="text-[9px] font-black uppercase tracking-widest text-slate-500">Ou</span>
+              <span className="text-[9px] font-black text-slate-600 uppercase">Ou entre com</span>
               <div className="flex-1 border-t border-white/5"></div>
             </div>
 
             <button 
               onClick={handleGoogleLogin} 
               disabled={isLoggingWithGoogle}
-              className="w-full bg-white hover:bg-slate-50 text-black py-4 rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-3 active:scale-95 transition-all shadow-xl disabled:opacity-50"
+              className="w-full bg-white text-black py-4 rounded-2xl font-black uppercase flex items-center justify-center gap-3 active:scale-95 transition-all shadow-xl"
             >
-              {isLoggingWithGoogle ? (
-                <div className="w-5 h-5 border-2 border-slate-300 border-t-emerald-500 rounded-full animate-spin"></div>
-              ) : (
-                <>
-                  <svg width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.1c-.22-.66-.35-1.36-.35-2.1s.13-1.44.35-2.1V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-                  Google
-                </>
-              )}
+              <svg width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.1c-.22-.66-.35-1.36-.35-2.1s.13-1.44.35-2.1V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+              Google
             </button>
           </div>
         </div>
@@ -336,7 +305,7 @@ const App: React.FC = () => {
     );
   }
 
-  // DASHBOARD PRINCIPAL
+  // TELA DASHBOARD
   if (step >= 6) {
     const consumed = meals.reduce((s, m) => s + (m.calories || 0), 0);
     const burned = exercises.reduce((s, e) => s + (e.caloriesBurned || 0), 0);
@@ -348,43 +317,38 @@ const App: React.FC = () => {
         <header className="px-6 pt-12 pb-6 bg-[#0f172a]/80 backdrop-blur-2xl border-b border-white/5 sticky top-0 z-[100] flex justify-between items-center">
           <div>
             <h1 className="text-xl font-black text-emerald-400 tracking-tighter uppercase leading-none">Nutri<span className="text-white">Amiga</span></h1>
-            <p className="text-slate-500 text-[10px] font-black uppercase opacity-60 mt-1">Olá, {userData?.name.split(' ')[0] || 'Nutri'}</p>
+            <p className="text-slate-500 text-[10px] font-black uppercase opacity-60 mt-1">Oi, {userData?.name.split(' ')[0] || 'Nutri'}! 👋</p>
           </div>
           <button onClick={() => setIsSettingsOpen(true)} className="w-10 h-10 glass-card rounded-2xl flex items-center justify-center text-slate-400 active:scale-90 transition-transform">
-             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12.22 2h-.44a2 2 0 0 0-2 2a2 2 0 0 1-2 2a2 2 0 0 0-2 2a2 2 0 0 1-2 2a2 2 0 0 0-2 2v.44a2 2 0 0 0 2 2a2 2 0 0 1 2 2a2 2 0 0 0 2 2a2 2 0 0 1 2 2a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2a2 2 0 0 1 2-2a2 2 0 0 0 2-2a2 2 0 0 1 2-2a2 2 0 0 0 2-2v-.44a2 2 0 0 0-2-2a2 2 0 0 1-2-2a2 2 0 0 0-2-2a2 2 0 0 1-2-2a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           </button>
         </header>
 
-        {isSettingsOpen && (activeTab === 'profile' || isSettingsOpen) && (
-          <div className="fixed inset-0 z-[200] flex items-center justify-center p-6">
+        {isSettingsOpen && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 animate-in fade-in duration-300">
             <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-md" onClick={() => setIsSettingsOpen(false)}></div>
-            <div className="glass-card w-full max-w-sm rounded-[2.5rem] p-8 relative shadow-2xl space-y-8 animate-in zoom-in duration-300">
-               <div className="flex justify-between items-center">
+            <div className="glass-card w-full max-w-sm rounded-[2.5rem] p-8 relative shadow-2xl space-y-6">
+               <div className="flex justify-between items-center mb-2">
                  <h2 className="text-xl font-black">Seu Perfil</h2>
-                 <button onClick={() => setIsSettingsOpen(false)} className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center">✕</button>
+                 <button onClick={() => setIsSettingsOpen(false)} className="w-8 h-8 flex items-center justify-center bg-white/5 rounded-full">✕</button>
                </div>
                <div className="space-y-4">
-                 <div className="bg-black/40 p-5 rounded-3xl border border-white/5 flex items-center gap-4">
-                    <div className="w-12 h-12 bg-emerald-500 rounded-full flex items-center justify-center font-black text-white">
-                        {userData?.name[0]?.toUpperCase() || 'U'}
-                    </div>
-                    <div>
-                        <p className="font-black">{userData?.name}</p>
-                        <p className="text-[10px] text-slate-500">{user?.email}</p>
-                    </div>
+                 <div className="bg-white/5 p-4 rounded-3xl border border-white/5">
+                    <p className="text-[10px] font-black uppercase text-slate-500 mb-1">E-mail</p>
+                    <p className="text-sm font-bold truncate">{user?.email}</p>
                  </div>
-                 <div className="grid grid-cols-2 gap-3">
-                    <div className="bg-black/40 p-4 rounded-2xl border border-white/5">
-                        <p className="text-[9px] font-black uppercase text-slate-500 mb-1">Peso</p>
-                        <p className="text-lg font-black">{userData?.weight} kg</p>
+                 <div className="grid grid-cols-2 gap-4">
+                    <div className="bg-white/5 p-4 rounded-3xl border border-white/5">
+                        <p className="text-[10px] font-black uppercase text-slate-500">Peso</p>
+                        <p className="text-lg font-black">{userData?.weight}kg</p>
                     </div>
-                    <div className="bg-black/40 p-4 rounded-2xl border border-white/5">
-                        <p className="text-[9px] font-black uppercase text-slate-500 mb-1">Altura</p>
-                        <p className="text-lg font-black">{userData?.height} cm</p>
+                    <div className="bg-white/5 p-4 rounded-3xl border border-white/5">
+                        <p className="text-[10px] font-black uppercase text-slate-500">Altura</p>
+                        <p className="text-lg font-black">{userData?.height}cm</p>
                     </div>
                  </div>
                </div>
-               <button onClick={handleLogout} className="w-full bg-red-500/10 border border-red-500/20 text-red-400 py-5 rounded-2xl font-black text-xs uppercase active:scale-95 transition-all">Sair do NutriAmiga</button>
+               <button onClick={handleLogout} className="w-full bg-red-500/10 border border-red-500/20 text-red-400 py-5 rounded-3xl font-black text-[10px] uppercase tracking-widest active:scale-95 transition-all">Sair da Conta</button>
             </div>
           </div>
         )}
@@ -393,14 +357,14 @@ const App: React.FC = () => {
           {activeTab === 'home' && step === 6 && (
             <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
               <section className="bg-gradient-to-br from-emerald-600 to-emerald-800 border border-emerald-500/20 rounded-[2.5rem] p-8 shadow-2xl shadow-emerald-500/10 space-y-6">
-                <div className="flex justify-between items-end">
+                <div className="flex justify-between items-end text-white">
                   <div className="space-y-1">
-                    <p className="text-[10px] font-black uppercase text-emerald-100/60 tracking-widest">Resumo de Hoje</p>
-                    <h3 className="text-5xl font-black text-white">{consumed} <span className="text-sm opacity-60 font-medium">kcal</span></h3>
+                    <p className="text-[10px] font-black uppercase text-emerald-100/60 tracking-widest">Calorias Hoje</p>
+                    <h3 className="text-5xl font-black">{consumed} <span className="text-sm opacity-60 font-medium">kcal</span></h3>
                   </div>
                   <div className="text-right">
                     <p className="text-[10px] font-black text-emerald-100 uppercase tracking-widest">Restante</p>
-                    <h4 className="text-2xl font-black text-white">{totalMeta - consumed}</h4>
+                    <h4 className="text-2xl font-black">{Math.max(0, totalMeta - consumed)}</h4>
                   </div>
                 </div>
                 <div className="h-5 w-full bg-black/20 rounded-full overflow-hidden p-1 shadow-inner">
@@ -410,36 +374,36 @@ const App: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-4">
                 <section className="glass-card p-6 rounded-[2rem] text-center space-y-3">
-                  <h4 className="text-[10px] font-black uppercase text-blue-400 tracking-widest">Água</h4>
+                  <h4 className="text-[10px] font-black uppercase text-blue-400 tracking-widest">Água Diária</h4>
                   <div className="flex items-center justify-center gap-4">
-                    <button onClick={() => updateWater(Math.max(0, waterGlasses - 1))} className="w-9 h-9 rounded-2xl bg-white/5 font-black active:bg-white/10 transition-colors">－</button>
+                    <button onClick={() => updateWater(Math.max(0, waterGlasses - 1))} className="w-10 h-10 rounded-2xl bg-white/5 font-black active:bg-white/10 transition-colors">－</button>
                     <span className="text-3xl font-black">{waterGlasses}</span>
-                    <button onClick={() => updateWater(waterGlasses + 1)} className="w-9 h-9 rounded-2xl bg-blue-500/20 text-blue-400 font-black">＋</button>
+                    <button onClick={() => updateWater(waterGlasses + 1)} className="w-10 h-10 rounded-2xl bg-blue-500/20 text-blue-400 font-black">＋</button>
                   </div>
                 </section>
-                <section className="glass-card p-6 rounded-[2rem] text-center space-y-2 flex flex-col justify-center">
+                <section className="glass-card p-6 rounded-[2rem] text-center space-y-2 flex flex-col justify-center items-center">
                   <h4 className="text-[10px] font-black uppercase text-emerald-400 tracking-widest">Atividade</h4>
-                  <div className="text-3xl font-black">-{burned} <span className="text-xs text-slate-500 font-medium tracking-normal">kcal</span></div>
+                  <div className="text-3xl font-black">-{burned} <span className="text-xs text-slate-500 font-medium">kcal</span></div>
                 </section>
               </div>
 
-              <div className="grid grid-cols-1 gap-4">
-                 <button onClick={() => { setMode('meal'); setStep(9); }} className="bg-emerald-500/10 border border-emerald-500/20 p-8 rounded-[2.5rem] flex items-center justify-between active:scale-95 transition-all group">
+              <div className="space-y-4">
+                 <button onClick={() => { setMode('meal'); setStep(9); }} className="w-full bg-emerald-500/10 border border-emerald-500/20 p-8 rounded-[2.5rem] flex items-center justify-between active:scale-95 transition-all group">
                     <div className="flex items-center gap-5">
-                        <span className="text-4xl group-hover:scale-110 transition-transform">🥗</span>
+                        <div className="w-14 h-14 bg-emerald-500/20 rounded-3xl flex items-center justify-center text-3xl group-hover:scale-110 transition-transform">🥗</div>
                         <div className="text-left">
-                            <h4 className="font-black text-emerald-400 text-sm">Registrar Refeição</h4>
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Adicionar o que você comeu</p>
+                            <h4 className="font-black text-emerald-400 text-sm">Registrar Comida</h4>
+                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">A IA analisa o que você comeu</p>
                         </div>
                     </div>
                     <span className="text-emerald-500/40 font-black text-2xl">→</span>
                  </button>
-                 <button onClick={() => { setMode('exercise'); setStep(9); }} className="bg-blue-500/10 border border-blue-500/20 p-8 rounded-[2.5rem] flex items-center justify-between active:scale-95 transition-all group">
+                 <button onClick={() => { setMode('exercise'); setStep(9); }} className="w-full bg-blue-500/10 border border-blue-500/20 p-8 rounded-[2.5rem] flex items-center justify-between active:scale-95 transition-all group">
                     <div className="flex items-center gap-5">
-                        <span className="text-4xl group-hover:scale-110 transition-transform">🏃‍♂️</span>
+                        <div className="w-14 h-14 bg-blue-500/20 rounded-3xl flex items-center justify-center text-3xl group-hover:scale-110 transition-transform">🏃‍♂️</div>
                         <div className="text-left">
-                            <h4 className="font-black text-blue-400 text-sm">Registrar Exercício</h4>
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Contabilizar queima calórica</p>
+                            <h4 className="font-black text-blue-400 text-sm">Registrar Treino</h4>
+                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Desconte calorias do seu dia</p>
                         </div>
                     </div>
                     <span className="text-blue-500/40 font-black text-2xl">→</span>
@@ -451,19 +415,18 @@ const App: React.FC = () => {
           {activeTab === 'history' && (
             <div className="space-y-6 animate-in slide-in-from-right duration-500">
                <div className="flex justify-between items-center mb-2">
-                 <h2 className="text-2xl font-black">Diário Alimentar</h2>
+                 <h2 className="text-2xl font-black">Meu Diário</h2>
                  <input 
-                    type="date" 
-                    value={selectedDate} 
+                    type="date" value={selectedDate} 
                     onChange={(e) => setSelectedDate(e.target.value)} 
-                    className="bg-white/5 border border-white/5 rounded-xl px-3 py-1 text-xs font-black outline-none"
+                    className="bg-white/5 border border-white/5 rounded-xl px-3 py-1.5 text-xs font-black outline-none focus:border-emerald-500/40"
                  />
                </div>
                
                {meals.length === 0 && exercises.length === 0 ? (
-                 <div className="glass-card p-12 rounded-[2.5rem] text-center space-y-4 border-dashed border-white/10 opacity-60">
-                    <span className="text-5xl block">📝</span>
-                    <p className="text-sm font-bold text-slate-400">Nenhum registro para este dia.</p>
+                 <div className="glass-card p-16 rounded-[2.5rem] text-center space-y-4 border-dashed border-white/10 opacity-60">
+                    <span className="text-6xl block">📝</span>
+                    <p className="text-sm font-bold text-slate-400">Nenhum registro encontrado.</p>
                  </div>
                ) : (
                  <div className="space-y-4">
@@ -471,19 +434,20 @@ const App: React.FC = () => {
                      <div key={meal.id} className="glass-card p-6 rounded-3xl border-l-4 border-emerald-500 flex justify-between items-start gap-4">
                         <div className="space-y-2 flex-1">
                             <div className="flex items-center gap-2">
-                                <span className="text-[10px] font-black uppercase text-emerald-500 bg-emerald-500/10 px-2 py-0.5 rounded-full">{meal.type}</span>
-                                <span className="text-[10px] text-slate-500 font-bold">{meal.calories} kcal</span>
+                                <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${meal.status === 'verde' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
+                                    {meal.calories} kcal
+                                </span>
                             </div>
                             <p className="font-bold text-sm leading-snug">"{meal.description}"</p>
-                            {meal.feedback && <p className="text-[10px] text-slate-400 italic font-medium leading-relaxed">Nutri: {meal.feedback}</p>}
+                            {meal.feedback && <p className="text-[10px] text-slate-400 italic font-medium leading-relaxed">✨ {meal.feedback}</p>}
                         </div>
-                        <div className={`w-3 h-3 rounded-full shrink-0 mt-1 ${meal.status === 'verde' ? 'bg-emerald-500' : meal.status === 'amarelo' ? 'bg-yellow-500' : 'bg-blue-500'}`}></div>
+                        <div className={`w-3 h-3 rounded-full shrink-0 mt-1 ${meal.status === 'verde' ? 'bg-emerald-500' : 'bg-yellow-500'}`}></div>
                      </div>
                    ))}
                    {exercises.map((ex) => (
                      <div key={ex.id} className="glass-card p-6 rounded-3xl border-l-4 border-blue-500 flex justify-between items-center gap-4">
                         <div className="space-y-1">
-                            <span className="text-[10px] font-black uppercase text-blue-500 bg-blue-500/10 px-2 py-0.5 rounded-full">Treino</span>
+                            <span className="text-[9px] font-black uppercase text-blue-400 bg-blue-400/10 px-2 py-0.5 rounded-full">Treino</span>
                             <p className="font-bold text-sm leading-snug">{ex.description}</p>
                         </div>
                         <span className="text-blue-400 font-black">-{ex.caloriesBurned} kcal</span>
@@ -495,38 +459,47 @@ const App: React.FC = () => {
           )}
 
           {step === 9 && (
-            <div className="space-y-6 animate-in slide-in-from-bottom-8 duration-500 pb-20 fixed inset-0 z-[160] bg-[#020617] p-8 overflow-y-auto">
-               <button onClick={() => setStep(6)} className="text-emerald-400 font-black text-[10px] uppercase tracking-[0.2em] mb-4 p-2">← Voltar</button>
-               <div className="glass-card rounded-[2.5rem] p-8 space-y-6 shadow-2xl mt-4">
-                 <h2 className="text-3xl font-black tracking-tighter">{mode === 'meal' ? 'O que você comeu?' : 'Qual foi o treino?'}</h2>
+            <div className="fixed inset-0 z-[160] bg-[#020617] p-8 overflow-y-auto safe-area-bottom animate-in slide-in-from-bottom duration-500">
+               <button onClick={() => { setStep(6); setFeedback(null); setInputVal(''); }} className="text-emerald-400 font-black text-[11px] uppercase tracking-[0.2em] mb-8 flex items-center gap-2">
+                 <span>←</span> VOLTAR PARA HOME
+               </button>
+               
+               <div className="glass-card rounded-[2.5rem] p-8 space-y-6 shadow-2xl">
+                 <h2 className="text-3xl font-black tracking-tighter">O que {mode === 'meal' ? 'você comeu' : 'foi o treino'}?</h2>
                  <textarea 
                     value={inputVal} 
                     onChange={(e) => setInputVal(e.target.value)} 
-                    placeholder={mode === 'meal' ? "Ex: 1 pão integral com queijo e suco de laranja..." : "Ex: 20 min de corrida moderada..."}
-                    className="w-full h-48 bg-black/40 border border-white/5 rounded-3xl p-6 outline-none text-white resize-none text-sm leading-relaxed placeholder:opacity-30" 
+                    placeholder={mode === 'meal' ? "Ex: 2 ovos mexidos, uma fatia de pão integral e café sem açúcar..." : "Ex: Corrida leve de 30 minutos no parque..."}
+                    className="w-full h-48 bg-black/40 border border-white/5 rounded-3xl p-6 outline-none text-white resize-none text-sm leading-relaxed placeholder:opacity-30 focus:border-emerald-500/40 transition-all" 
                  />
                  <button 
                     onClick={handleEntryRegistration} 
                     disabled={isAnalyzing || !inputVal} 
-                    className="w-full py-6 bg-emerald-500 text-white rounded-3xl font-black text-xs uppercase tracking-widest disabled:opacity-50 transition-all active:scale-95 shadow-xl shadow-emerald-500/20"
+                    className="w-full py-6 bg-emerald-500 text-white rounded-3xl font-black text-[11px] uppercase tracking-[0.2em] disabled:opacity-50 transition-all active:scale-95 shadow-xl shadow-emerald-500/20"
                  >
                     {isAnalyzing ? (
-                        <div className="flex items-center justify-center gap-2">
-                            <div className="w-3 h-3 bg-white rounded-full animate-bounce"></div>
-                            <span>Analisando...</span>
+                        <div className="flex items-center justify-center gap-3">
+                            <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{animationDelay: '0ms'}}></div>
+                            <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{animationDelay: '150ms'}}></div>
+                            <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{animationDelay: '300ms'}}></div>
                         </div>
-                    ) : 'Salvar no Diário'}
+                    ) : 'SALVAR REGISTRO'}
                  </button>
                </div>
                
                {feedback && (
-                 <div className="glass-card p-8 rounded-[2.5rem] space-y-5 animate-in zoom-in duration-300">
+                 <div className="glass-card p-8 rounded-[2.5rem] mt-6 space-y-5 animate-in zoom-in duration-300">
                    <div className="flex items-center gap-3">
                        <span className="text-2xl">✨</span>
-                       <h4 className="text-[11px] font-black uppercase text-emerald-400 tracking-widest">Feedback da Nutri</h4>
+                       <h4 className="text-[10px] font-black uppercase text-emerald-400 tracking-widest">Análise da Nutri</h4>
                    </div>
                    <p className="text-sm font-medium italic text-slate-300 leading-relaxed">"{feedback}"</p>
-                   <button onClick={() => { setStep(6); setFeedback(null); setInputVal(''); }} className="w-full py-4 bg-emerald-500/20 text-emerald-400 rounded-2xl font-black text-[10px] uppercase border border-emerald-500/20">Continuar Jornada</button>
+                   <button 
+                      onClick={() => { setStep(6); setFeedback(null); setInputVal(''); }} 
+                      className="w-full py-4 bg-emerald-500/20 text-emerald-400 rounded-2xl font-black text-[10px] uppercase border border-emerald-500/20"
+                   >
+                      CONTINUAR JORNADA
+                   </button>
                  </div>
                )}
             </div>
@@ -535,8 +508,8 @@ const App: React.FC = () => {
 
         <nav className="fixed bottom-8 left-6 right-6 h-20 bg-[#0f172a]/95 backdrop-blur-3xl border border-white/10 rounded-[2.5rem] flex items-center justify-around px-4 z-[150] shadow-2xl safe-area-bottom">
           <button onClick={() => setActiveTab('home')} className={`flex flex-col items-center gap-1.5 transition-all ${activeTab === 'home' ? 'text-emerald-400 scale-110' : 'text-slate-500'}`}>
-            <span className="text-xl">{activeTab === 'home' ? '🏘️' : '🏠'}</span>
-            <span className="text-[8px] font-black uppercase tracking-tighter">Início</span>
+            <span className="text-xl">🏠</span>
+            <span className="text-[8px] font-black uppercase tracking-tighter">Home</span>
           </button>
           
           <div className="relative -top-10">
@@ -549,7 +522,7 @@ const App: React.FC = () => {
           </div>
 
           <button onClick={() => setActiveTab('history')} className={`flex flex-col items-center gap-1.5 transition-all ${activeTab === 'history' ? 'text-emerald-400 scale-110' : 'text-slate-500'}`}>
-            <span className="text-xl">{activeTab === 'history' ? '📑' : '📖'}</span>
+            <span className="text-xl">📑</span>
             <span className="text-[8px] font-black uppercase tracking-tighter">Diário</span>
           </button>
         </nav>
@@ -557,20 +530,24 @@ const App: React.FC = () => {
     );
   }
 
-  // ONBOARDING
+  // TELA ONBOARDING
   return (
-    <div className="flex flex-col min-h-screen bg-[#020617] text-white p-8 justify-center items-center relative overflow-hidden">
-      <div className="absolute top-[-20%] left-[-20%] w-[100%] h-[60%] bg-blue-500/5 blur-[120px] rounded-full"></div>
+    <div className="flex flex-col min-h-screen bg-[#020617] text-white p-10 justify-center items-center relative overflow-hidden">
+      <div className="absolute top-[-20%] left-[-20%] w-[100%] h-[60%] bg-emerald-500/5 blur-[120px] rounded-full animate-pulse"></div>
 
       {step === 1 && (
         <div className="w-full max-w-sm space-y-12 text-center animate-in slide-in-from-right duration-500">
            <div className="space-y-4">
                <h2 className="text-5xl font-black tracking-tighter">Seja bem-vinda! 👋</h2>
-               <p className="text-slate-400 text-sm leading-relaxed">Antes de começarmos, como você gostaria de ser chamada no app?</p>
+               <p className="text-slate-400 text-sm leading-relaxed">Vou te ajudar a comer melhor todos os dias. Como posso te chamar?</p>
            </div>
            <div className="space-y-6">
-             <input type="text" placeholder="Nome ou Apelido" className="w-full bg-white/5 border border-white/5 p-6 rounded-[2rem] text-xl outline-none focus:border-emerald-500/40 text-center font-black" value={onboardingName} onChange={e => setOnboardingName(e.target.value)} />
-             <button onClick={() => setStep(2)} disabled={!onboardingName} className="w-full bg-emerald-500 py-6 rounded-[2.5rem] font-black uppercase tracking-widest disabled:opacity-50 shadow-xl shadow-emerald-500/10">Continuar</button>
+             <input 
+                type="text" placeholder="Seu apelido" 
+                className="w-full bg-white/5 border border-white/10 p-6 rounded-[2rem] text-xl outline-none focus:border-emerald-500/40 text-center font-black transition-all" 
+                value={onboardingName} onChange={e => setOnboardingName(e.target.value)} 
+             />
+             <button onClick={() => setStep(2)} disabled={!onboardingName} className="w-full bg-emerald-500 py-6 rounded-[2.5rem] font-black uppercase tracking-widest disabled:opacity-50 shadow-xl shadow-emerald-500/10 active:scale-95 transition-all">Continuar</button>
            </div>
         </div>
       )}
@@ -578,21 +555,21 @@ const App: React.FC = () => {
       {step === 2 && (
         <div className="w-full max-w-sm space-y-10 animate-in slide-in-from-right duration-500">
            <div className="space-y-4 text-center">
-               <h2 className="text-3xl font-black tracking-tighter">Suas Medidas ⚖️</h2>
-               <p className="text-slate-400 text-sm">Usamos isso para calcular suas necessidades reais.</p>
+               <h2 className="text-4xl font-black tracking-tighter">Quase lá! ⚖️</h2>
+               <p className="text-slate-400 text-sm">Preciso dessas informações para calcular suas calorias ideais.</p>
            </div>
            <div className="space-y-5">
              <div className="grid grid-cols-2 gap-4">
                  <div className="space-y-3">
                      <label className="text-[10px] font-black uppercase text-slate-500 ml-6">Peso (kg)</label>
-                     <input type="number" placeholder="70" className="bg-white/5 border border-white/5 p-5 rounded-[2rem] w-full text-center outline-none focus:border-emerald-500/40 font-black text-lg" value={onboardingWeight} onChange={e => setOnboardingWeight(e.target.value)} />
+                     <input type="number" placeholder="70" className="bg-white/5 border border-white/10 p-5 rounded-[2rem] w-full text-center outline-none focus:border-emerald-500/40 font-black text-lg" value={onboardingWeight} onChange={e => setOnboardingWeight(e.target.value)} />
                  </div>
                  <div className="space-y-3">
                      <label className="text-[10px] font-black uppercase text-slate-500 ml-6">Altura (cm)</label>
-                     <input type="number" placeholder="170" className="bg-white/5 border border-white/5 p-5 rounded-[2rem] w-full text-center outline-none focus:border-emerald-500/40 font-black text-lg" value={onboardingHeight} onChange={e => setOnboardingHeight(e.target.value)} />
+                     <input type="number" placeholder="170" className="bg-white/5 border border-white/10 p-5 rounded-[2rem] w-full text-center outline-none focus:border-emerald-500/40 font-black text-lg" value={onboardingHeight} onChange={e => setOnboardingHeight(e.target.value)} />
                  </div>
              </div>
-             <button onClick={handleOnboardingSubmit} disabled={!onboardingWeight || !onboardingHeight} className="w-full bg-emerald-500 py-6 rounded-[2.5rem] font-black uppercase tracking-widest active:scale-95 transition-all shadow-xl shadow-emerald-500/10 disabled:opacity-50">Tudo Pronto!</button>
+             <button onClick={handleOnboardingSubmit} disabled={!onboardingWeight || !onboardingHeight} className="w-full bg-emerald-500 py-6 rounded-[2.5rem] font-black uppercase tracking-widest active:scale-95 transition-all shadow-xl shadow-emerald-500/10 disabled:opacity-50">COMEÇAR MINHA JORNADA</button>
            </div>
         </div>
       )}

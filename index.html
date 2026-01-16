@@ -17,23 +17,30 @@
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(16, 185, 129, 0.2); border-radius: 10px; }
+        
         @keyframes pulse-slow {
-            0%, 100% { transform: scale(1.1); }
-            50% { transform: scale(1.15); }
+            0%, 100% { transform: scale(1.1); opacity: 0.1; }
+            50% { transform: scale(1.15); opacity: 0.15; }
         }
-        .animate-pulse-slow { animation: pulse-slow 30s infinite ease-in-out; }
-        body { -webkit-tap-highlight-color: transparent; outline: none; }
-        input, button, textarea { -webkit-tap-highlight-color: transparent; }
+        .animate-pulse-slow { animation: pulse-slow 15s infinite ease-in-out; }
+        
+        body { 
+            -webkit-tap-highlight-color: transparent; 
+            outline: none; 
+            overscroll-behavior-y: none;
+        }
         
         .glass-card {
             background: rgba(15, 23, 42, 0.6);
-            backdrop-filter: blur(12px);
+            backdrop-filter: blur(16px);
             border: 1px solid rgba(255, 255, 255, 0.05);
         }
 
         .safe-area-bottom {
-            padding-bottom: env(safe-area-inset-bottom, 24px);
+            padding-bottom: calc(env(safe-area-inset-bottom, 24px) + 24px);
         }
+        
+        input, button, textarea { font-family: inherit; }
     </style>
 <script type="importmap">
 {
