@@ -400,7 +400,7 @@ const App: React.FC = () => {
       const { outcome } = await deferredPrompt.userChoice;
       if (outcome === 'accepted') setDeferredPrompt(null);
     } else {
-      setShowInstallGuide(true);
+      alert("A instalação automática não está disponível no momento. Verifique se o app já está instalado ou use o menu do seu navegador.");
     }
   };
 
