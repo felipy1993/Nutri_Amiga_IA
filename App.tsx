@@ -47,51 +47,9 @@ Depois, use EXATAMENTE estas tags para os dados (NÃO mude a estrutura):
 
 Exemplo: "Que escolha maravilhosa! O frango grelhado com legumes vai te dar muita energia hoje. ✨ [ITEM: Peito de Frango | 120g | 190] [ITEM: Brócolis no Vapor | 80g | 28] [TOTAL_CALORIES: 218] [STATUS: VERDE]"`;
 
-interface FoodItem {
-  name: string;
-  weight: string;
-  calories: number;
-}
+import { FoodItem, UserData, ChatMessage, MealRecord, ExerciseRecord, WeightLog } from './types';
 
-interface UserData {
-  name: string;
-  birthDate: string;
-  age: string;
-  gender: string;
-  weight: string;
-  height: string;
-  goal: string;
-  activityLevel: 'sedentario' | 'leve' | 'moderado' | 'intenso';
-  calorieGoal: number;
-}
-
-interface ChatMessage {
-  role: 'user' | 'model';
-  text: string;
-}
-
-interface MealRecord {
-  id: string;
-  date: string;
-  type: string;
-  description: string;
-  feedback: string;
-  status: 'verde' | 'amarelo' | 'azul';
-  calories: number;
-  items: FoodItem[];
-}
-
-interface ExerciseRecord {
-  id: string;
-  date: string;
-  description: string;
-  caloriesBurned: number;
-}
-
-interface WeightLog {
-  date: string;
-  weight: number;
-}
+// ... (Other imports remain, this block replaces the interfaces)
 
 const App: React.FC = () => {
   // --- States ---
@@ -430,12 +388,19 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (step >= 6 && currentUser) {
+      // Auto-fullscreen check
       if (!document.fullscreenElement) {
          try { toggleFullScreen(); } catch (e) {}
       }
-      const data = { userData, meals, exercises, weightHistory, dailyStats };
-      const docRef = doc(db, "users", currentUser.uid);
-      setDoc(docRef, data, { merge: true }).catch(e => console.error("Firebase sync error", e));
+
+      // Debounced Save
+      const timer = setTimeout(() => {
+        const data = { userData, meals, exercises, weightHistory, dailyStats };
+        const docRef = doc(db, "users", currentUser.uid);
+        setDoc(docRef, data, { merge: true }).catch(e => console.error("Firebase sync error", e));
+      }, 2000);
+
+      return () => clearTimeout(timer);
     }
   }, [userData, meals, exercises, weightHistory, dailyStats, step, currentUser]);
 
@@ -621,6 +586,9 @@ const App: React.FC = () => {
             )}
           </div>
         </div>
+        <p className="mt-8 text-[10px] text-slate-600 font-bold text-center max-w-sm px-4 uppercase tracking-wider leading-relaxed opacity-60">
+          Nota: A IA pode cometer erros. As sugestões não substituem o aconselhamento médico profissional. Use com responsabilidade.
+        </p>
       </div>
     );
   }
