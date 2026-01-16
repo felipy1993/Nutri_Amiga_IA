@@ -158,12 +158,6 @@ const App: React.FC = () => {
     return (w && h) ? w / (h * h) : 0;
   };
 
-  const getWeightRange = () => {
-    const h = parseFloat(userData.height) / 100;
-    if (!h) return { min: 0, max: 0 };
-    return { min: Math.round(18.5 * (h * h)), max: Math.round(24.9 * (h * h)) };
-  };
-
   const getBMICategory = (bmi: number) => {
     if (bmi < 18.5) return { label: 'Abaixo do peso', color: 'text-blue-300', bg: 'bg-blue-500/10' };
     if (bmi < 25) return { label: 'Peso ideal ✨', color: 'text-rose-400', bg: 'bg-rose-500/10' };
@@ -335,6 +329,16 @@ const App: React.FC = () => {
     setIsSettingsOpen(false);
   };
 
+  const handleInstallClick = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === 'accepted') setDeferredPrompt(null);
+    } else {
+      setShowInstallGuide(true);
+    }
+  };
+
   // --- Effects ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -345,7 +349,18 @@ const App: React.FC = () => {
         setStep(-1);
       }
     });
-    return () => unsubscribe();
+
+    const handleBeforeInstallPrompt = (e: any) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    };
   }, []);
 
   useEffect(() => {
@@ -560,9 +575,44 @@ const App: React.FC = () => {
             <div className="bg-slate-900 border border-white/10 w-full max-w-sm rounded-[2.5rem] p-8 relative shadow-2xl animate-in zoom-in-95">
                <div className="flex justify-between items-center mb-6"><h2 className="text-xl font-black text-white">Ajustes</h2><button onClick={() => setIsSettingsOpen(false)} className="text-slate-500 text-xl p-2">✕</button></div>
                <div className="space-y-4">
-                 <button onClick={() => { if(deferredPrompt) deferredPrompt.prompt(); else setShowInstallGuide(true); }} className="w-full bg-white/5 border border-white/10 text-white p-5 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-3">📲 Instalar App</button>
-                 <button onClick={handleSignOut} className="w-full bg-rose-500/10 border border-rose-500/30 text-rose-400 p-5 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-3">Sair da Conta</button>
+                 <button onClick={handleInstallClick} className="w-full bg-white/5 border border-white/10 text-white p-5 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-3 active:scale-95 transition-transform shadow-lg shadow-black/20">
+                    📲 INSTALAR APP
+                 </button>
+                 <button onClick={handleSignOut} className="w-full bg-rose-500/10 border border-rose-500/30 text-rose-400 p-5 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-3 active:scale-95 transition-transform">
+                    SAIR DA CONTA
+                 </button>
                </div>
+            </div>
+          </div>
+        )}
+
+        {showInstallGuide && (
+          <div className="fixed inset-0 z-[300] flex items-end justify-center p-6 sm:items-center">
+            <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={() => setShowInstallGuide(false)}></div>
+            <div className="bg-slate-900 border border-white/10 w-full max-w-sm rounded-[2.5rem] p-8 relative shadow-2xl animate-in slide-in-from-bottom duration-300">
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-xl font-black text-white">Como Instalar</h2>
+                <button onClick={() => setShowInstallGuide(false)} className="text-slate-500 text-xl p-2">✕</button>
+              </div>
+              <div className="space-y-6">
+                <div className="space-y-4">
+                  <div className="flex items-start gap-4">
+                    <span className="text-2xl">🍎</span>
+                    <div>
+                      <p className="text-sm font-bold text-white">No iPhone / iOS</p>
+                      <p className="text-xs text-slate-400">Toque no ícone de <span className="text-rose-400 font-bold">Compartilhar</span> e depois em <span className="text-rose-400 font-bold">'Adicionar à Tela de Início'</span>.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-4">
+                    <span className="text-2xl">🤖</span>
+                    <div>
+                      <p className="text-sm font-bold text-white">No Android</p>
+                      <p className="text-xs text-slate-400">Toque nos <span className="text-rose-400 font-bold">três pontinhos</span> no canto superior e selecione <span className="text-rose-400 font-bold">'Instalar Aplicativo'</span>.</p>
+                    </div>
+                  </div>
+                </div>
+                <button onClick={() => setShowInstallGuide(false)} className="w-full bg-rose-500 text-white p-5 rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg shadow-rose-500/20 active:scale-95 transition-transform">Entendi ✨</button>
+              </div>
             </div>
           </div>
         )}
@@ -638,7 +688,7 @@ const App: React.FC = () => {
                  </button>
                  <button onClick={() => { setMode('suggest'); setStep(9); }} className="bg-violet-500/5 border border-violet-500/10 p-6 rounded-[2.5rem] flex flex-col items-center gap-2 active:bg-violet-500/10 transition-colors">
                     <span className="text-3xl">🧊</span>
-                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-100">O que comer?</span>
+                    <span className="text-[10px) font-black uppercase tracking-widest text-slate-100">O que comer?</span>
                  </button>
               </div>
             </div>
