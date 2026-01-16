@@ -12,6 +12,7 @@ MODOS DE OPERAÇÃO:
 4. SAÚDE: Você sabe calcular IMC e peso ideal.
 
 REGRAS:
+- Linguagem motivadora e simples.
 - SEMPRE retorne no final do texto a tag: [STATUS:COR][CALORIES:NUMERO][TYPE:MEAL|EXERCISE]`;
 
 interface UserData {
@@ -85,6 +86,32 @@ const App: React.FC = () => {
   const [isChatting, setIsChatting] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Helper para chamadas Gemini com Retry e Backoff Exponencial (ajuda com erro 429)
+  const callGemini = async (prompt: string, model: string = 'gemini-3-flash-preview', retries: number = 3): Promise<string> => {
+    let lastError: any = null;
+    for (let i = 0; i < retries; i++) {
+      try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const response = await ai.models.generateContent({
+          model: model,
+          contents: prompt,
+          config: { systemInstruction: SYSTEM_INSTRUCTION }
+        });
+        return response.text || "";
+      } catch (err: any) {
+        lastError = err;
+        // Se for 429, espera e tenta de novo
+        if (err?.status === 429 || err?.message?.includes('429')) {
+          const waitTime = Math.pow(2, i) * 1000;
+          await new Promise(r => setTimeout(r, waitTime));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastError;
+  };
+
   useEffect(() => {
     const apiKey = process.env.API_KEY;
     if (!apiKey || apiKey === 'undefined' || apiKey === '""') {
@@ -141,13 +168,9 @@ const App: React.FC = () => {
   const generateDailyTip = async (date: string) => {
     if (!hasApiKey) return;
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
-        contents: `Gere uma dica de saúde curta para ${userData.name}. Máximo 15 palavras.`,
-        config: { systemInstruction: SYSTEM_INSTRUCTION }
-      });
-      const tip = response.text || "Beba água e mantenha o foco!";
+      const prompt = `Gere uma dica de saúde curta para ${userData.name}. Máximo 15 palavras.`;
+      const text = await callGemini(prompt);
+      const tip = text || "Beba água e mantenha o foco!";
       setDailyTip(tip);
       localStorage.setItem(`nutri_tip_${date}`, tip);
     } catch (e) {
@@ -160,9 +183,7 @@ const App: React.FC = () => {
     setIsAnalyzing(true);
     try {
       if (!hasApiKey) throw new Error("API Key missing");
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       let prompt = "";
-      
       if (mode === 'exercise') {
         prompt = `EXERCÍCIO: Fez "${inputVal}". Peso: ${userData.weight}kg. [STATUS:VERDE][CALORIES:NUM][TYPE:EXERCISE]`;
       } else if (mode === 'meal') {
@@ -171,13 +192,7 @@ const App: React.FC = () => {
         prompt = `SUGESTÃO: Ingredientes "${inputVal}". [STATUS:VERDE][CALORIES:NUM][TYPE:MEAL]`;
       }
       
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
-        contents: prompt,
-        config: { systemInstruction: SYSTEM_INSTRUCTION }
-      });
-      
-      const text = response.text || "";
+      const text = await callGemini(prompt);
       const cleanedFeedback = text.split('[STATUS:')[0];
       setFeedback(cleanedFeedback);
       
@@ -201,7 +216,7 @@ const App: React.FC = () => {
         localStorage.setItem('nutri_meals_history', JSON.stringify(updated));
       }
     } catch (error) {
-      setFeedback("Não consegui analisar agora, mas o registro foi salvo!");
+      setFeedback("Não consegui analisar agora devido ao tráfego intenso, mas o registro foi salvo localmente!");
     } finally {
       setIsAnalyzing(false);
     }
@@ -227,20 +242,17 @@ const App: React.FC = () => {
   const handleSendMessage = async () => {
     if (!chatInput.trim() || isChatting) return;
     const userMsg: ChatMessage = { role: 'user', text: chatInput };
-    setChatMessages(prev => [...prev, userMsg]);
+    const currentMsgs = [...chatMessages, userMsg];
+    setChatMessages(currentMsgs);
     setChatInput('');
     setIsChatting(true);
     try {
       if (!hasApiKey) throw new Error("API Key missing");
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
-        contents: [...chatMessages, userMsg].map(msg => ({ role: msg.role === 'user' ? 'user' : 'model', parts: [{ text: msg.text }] })),
-        config: { systemInstruction: SYSTEM_INSTRUCTION }
-      });
-      setChatMessages(prev => [...prev, { role: 'model', text: response.text || "..." }]);
+      const prompt = `Conversa atual: ${currentMsgs.map(m => `${m.role}: ${m.text}`).join('\n')}\nResponda como a Nutri IA.`;
+      const text = await callGemini(prompt, 'gemini-3-flash-preview');
+      setChatMessages(prev => [...prev, { role: 'model', text: text || "..." }]);
     } catch (error) {
-      setChatMessages(prev => [...prev, { role: 'model', text: "Erro ao responder." }]);
+      setChatMessages(prev => [...prev, { role: 'model', text: "Muitas requisições agora. Pode tentar novamente em alguns segundos?" }]);
     } finally {
       setIsChatting(false);
       setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
@@ -269,7 +281,7 @@ const App: React.FC = () => {
 
   const ApiKeyAlert = () => !hasApiKey ? (
     <div className="bg-red-500/10 border border-red-500/20 p-4 rounded-2xl mb-4 text-[10px] text-red-400 font-bold uppercase tracking-widest">
-      ⚠️ API_KEY não configurada na Vercel.
+      ⚠️ API_KEY não configurada na Vercel. Adicione em Environment Variables.
     </div>
   ) : null;
 
@@ -588,7 +600,8 @@ const App: React.FC = () => {
             ].map(opt => (
               <button key={opt.id} onClick={() => {
                 const base = userData.goal === 'Emagrecer' ? 22 : userData.goal === 'Ganhar Músculos' ? 35 : 28;
-                const cGoal = Math.round(parseFloat(onboardingWeight) * base * opt.factor);
+                const weightNum = parseFloat(onboardingWeight) || 70;
+                const cGoal = Math.round(weightNum * base * opt.factor);
                 const final = { ...userData, weight: onboardingWeight, height: onboardingHeight, gender: onboardingGender, birthDate: onboardingBirthDate, activityLevel: opt.id as any, calorieGoal: cGoal };
                 setUserData(final);
                 localStorage.setItem('nutri_user_data', JSON.stringify(final));
