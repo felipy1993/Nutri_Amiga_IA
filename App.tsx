@@ -586,7 +586,7 @@ const App: React.FC = () => {
             )}
           </div>
         </div>
-        <p className="mt-8 text-[10px] text-slate-600 font-bold text-center max-w-sm px-4 uppercase tracking-wider leading-relaxed opacity-60">
+        <p className="mt-8 text-[10px] text-white font-bold text-center max-w-sm px-4 uppercase tracking-wider leading-relaxed relative z-10">
           Nota: A IA pode cometer erros. As sugestões não substituem o aconselhamento médico profissional. Use com responsabilidade.
         </p>
       </div>
@@ -882,6 +882,11 @@ const App: React.FC = () => {
                </div>
             </div>
           )}
+          <div className="pb-32 px-6 flex justify-center opacity-40 hover:opacity-100 transition-opacity">
+            <p className="text-[9px] font-bold text-center text-white max-w-[200px] uppercase tracking-wider leading-relaxed">
+              Nota: A IA pode cometer erros. As sugestões não substituem o aconselhamento médico profissional.
+            </p>
+          </div>
         </main>
 
         <nav className="fixed bottom-8 left-6 right-6 h-20 bg-[#0f172a]/60 backdrop-blur-2xl border border-white/10 rounded-[2.5rem] flex items-center justify-around px-4 z-[150] shadow-2xl">
