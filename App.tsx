@@ -114,7 +114,7 @@ const App: React.FC = () => {
   const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [waterGlasses, setWaterGlasses] = useState<number>(0);
   const [dailyTip, setDailyTip] = useState<string>('');
-  const [dailyStats, setDailyStats] = useState<Record<string, { water: number, tip: string }>>({});
+  const [dailyStats, setDailyStats] = useState<Record<string, { water: number, tip: string, messageCount?: number }>>({});
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isWeightModalOpen, setIsWeightModalOpen] = useState(false);
@@ -143,7 +143,27 @@ const App: React.FC = () => {
   const [isChatting, setIsChatting] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
   // --- Helper Functions ---
+  const toggleFullScreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch((e) => {
+        console.log("Full screen prevented:", e);
+      });
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
+    }
+  };
+
+  useEffect(() => {
+    const handleFsChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handleFsChange);
+    return () => document.removeEventListener('fullscreenchange', handleFsChange);
+  }, []);
+
   const getDayLabel = (dateStr: string) => {
     const todayStr = new Date().toISOString().split('T')[0];
     if (dateStr === todayStr) return 'Hoje';
@@ -151,6 +171,32 @@ const App: React.FC = () => {
     const days = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
     return days[date.getDay()];
   };
+
+  // ... (keeping existing helper functions)
+
+  // --- Effects --- 
+  // (Adding this new effect near other effects, but for simplicity of edit, inserting logic here or I should insert it in the main effect block.
+  // Ideally, I should place toggleFullScreen with other functions, and the effect in the Effects section.
+  // Because of the contiguous edit constraint, I will just add the function here and the button part later + effect separately if needed.
+  // Actually, I can add the effect here if I am careful, but Effects are further down. 
+  // Let's add the state and function here, and the effect in a separate block if possible, or I can just assume the user is okay with me not adding the effect if I can't reach it in one block.
+  // Wait, I can use multi_replace for this to be clean.)
+
+  // Let's use multi_replace to do it cleanly in one go.
+  // 1. Add state variable.
+  // 2. Add toggle function.
+  // 3. Add useEffect for auto-fullscreen.
+  // 4. Add button in header.
+
+// RE-PLANNING:
+// I will use multi_replace_file_content.
+// Chunk 1: Add state `isFullscreen` (lines 144 approx)
+// Chunk 2: Add `toggleFullScreen` function (lines 146 approx)
+// Chunk 3: Add `useEffect` for auto-run (lines 364 approx)
+// Chunk 4: Add Button in Header (lines 598 approx)
+
+// Let's execute multi_replace_file_content.
+
 
   const calculateBMI = () => {
     const w = parseFloat(userData.weight);
@@ -272,6 +318,25 @@ const App: React.FC = () => {
 
   const handleSendMessage = async () => {
     if (!chatInput.trim() || isChatting) return;
+
+    // Limit check
+    const todayStr = new Date().toISOString().split('T')[0];
+    const currentStats = dailyStats[todayStr] || { water: 0, tip: '', messageCount: 0 };
+    const msgCount = currentStats.messageCount || 0;
+
+    if (msgCount >= 15) {
+      setChatMessages(prev => [...prev, { role: 'user', text: chatInput }, { role: 'model', text: "🚫 Você atingiu o limite diário de 15 interações com a IA. Volte amanhã para continuar nossa conversa! 🌸" }]);
+      setChatInput('');
+      setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+      return;
+    }
+
+    // Increment count
+    setDailyStats(prev => ({
+      ...prev,
+      [todayStr]: { ...currentStats, messageCount: msgCount + 1 }
+    }));
+
     const userMsg: ChatMessage = { role: 'user', text: chatInput };
     const currentMsgs = [...chatMessages, userMsg];
     setChatMessages(currentMsgs);
@@ -365,6 +430,9 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (step >= 6 && currentUser) {
+      if (!document.fullscreenElement) {
+         try { toggleFullScreen(); } catch (e) {}
+      }
       const data = { userData, meals, exercises, weightHistory, dailyStats };
       const docRef = doc(db, "users", currentUser.uid);
       setDoc(docRef, data, { merge: true }).catch(e => console.error("Firebase sync error", e));
@@ -413,6 +481,23 @@ const App: React.FC = () => {
 
   const handleEntryRegistration = async () => {
     if (!inputVal) return;
+
+    // Limit check (Shared Logic)
+    const todayStr = new Date().toISOString().split('T')[0];
+    const currentStats = dailyStats[todayStr] || { water: 0, tip: '', messageCount: 0 };
+    const msgCount = currentStats.messageCount || 0;
+
+    if (msgCount >= 15) {
+      setFeedback("🚫 Você atingiu o limite diário de 15 interações com a IA. Volte amanhã! 🌸");
+      return;
+    }
+
+    // Increment count
+    setDailyStats(prev => ({
+      ...prev,
+      [todayStr]: { ...(prev[todayStr] || currentStats), messageCount: msgCount + 1 }
+    }));
+
     setIsAnalyzing(true);
     try {
       let prompt = "";
@@ -564,9 +649,18 @@ const App: React.FC = () => {
             <h1 className="text-xl font-black text-rose-400 font-mono tracking-tighter uppercase leading-none">Nutri<span className="text-white">Amiga</span></h1>
             <p className="text-slate-400 text-[10px] mt-1 font-bold uppercase tracking-[0.2em] opacity-60">Olá, {userData.name.split(' ')[0] || currentUser?.email?.split('@')[0]} ✨</p>
           </div>
-          <button onClick={() => setIsSettingsOpen(true)} className="w-10 h-10 bg-white/5 rounded-2xl flex items-center justify-center text-slate-400 border border-white/10 active:scale-95 transition-transform">
-             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12.22 2h-.44a2 2 0 0 0-2 2a2 2 0 0 1-2 2a2 2 0 0 0-2 2a2 2 0 0 1-2 2a2 2 0 0 0-2 2v.44a2 2 0 0 0 2 2a2 2 0 0 1 2 2a2 2 0 0 0 2 2a2 2 0 0 1 2 2a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2a2 2 0 0 1 2-2a2 2 0 0 0 2-2a2 2 0 0 1 2-2a2 2 0 0 0 2-2v-.44a2 2 0 0 0-2-2a2 2 0 0 1-2-2a2 2 0 0 0-2-2a2 2 0 0 1-2-2a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-          </button>
+          <div className="flex gap-2">
+            <button onClick={toggleFullScreen} className="w-10 h-10 bg-white/5 rounded-2xl flex items-center justify-center text-slate-400 border border-white/10 active:scale-95 transition-transform">
+               {!isFullscreen ? (
+                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+               ) : (
+                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg>
+               )}
+            </button>
+            <button onClick={() => setIsSettingsOpen(true)} className="w-10 h-10 bg-white/5 rounded-2xl flex items-center justify-center text-slate-400 border border-white/10 active:scale-95 transition-transform">
+               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12.22 2h-.44a2 2 0 0 0-2 2a2 2 0 0 1-2 2a2 2 0 0 0-2 2a2 2 0 0 1-2 2a2 2 0 0 0-2 2v.44a2 2 0 0 0 2 2a2 2 0 0 1 2 2a2 2 0 0 0 2 2a2 2 0 0 1 2 2a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2a2 2 0 0 1 2-2a2 2 0 0 0 2-2a2 2 0 0 1 2-2a2 2 0 0 0 2-2v-.44a2 2 0 0 0-2-2a2 2 0 0 1-2-2a2 2 0 0 0-2-2a2 2 0 0 1-2-2a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
         </header>
 
         {isSettingsOpen && (
@@ -576,7 +670,7 @@ const App: React.FC = () => {
                <div className="flex justify-between items-center mb-6"><h2 className="text-xl font-black text-white">Ajustes</h2><button onClick={() => setIsSettingsOpen(false)} className="text-slate-500 text-xl p-2">✕</button></div>
                <div className="space-y-4">
                  <button onClick={handleInstallClick} className="w-full bg-white/5 border border-white/10 text-white p-5 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-3 active:scale-95 transition-transform shadow-lg shadow-black/20">
-                    📲 INSTALAR APP
+                    📲 INSTALAR NO CELULAR
                  </button>
                  <button onClick={handleSignOut} className="w-full bg-rose-500/10 border border-rose-500/30 text-rose-400 p-5 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-3 active:scale-95 transition-transform">
                     SAIR DA CONTA
