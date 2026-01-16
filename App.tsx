@@ -98,8 +98,12 @@ const App: React.FC = () => {
 
   // Verificação de API_KEY e Carregamento de Dados
   useEffect(() => {
-    if (!process.env.API_KEY || process.env.API_KEY === 'undefined') {
+    // Verifica se a chave existe e não é uma string vazia ou "undefined"
+    const apiKey = process.env.API_KEY;
+    if (!apiKey || apiKey === 'undefined' || apiKey === '""') {
       setHasApiKey(false);
+    } else {
+      setHasApiKey(true);
     }
 
     try {
@@ -302,7 +306,7 @@ const App: React.FC = () => {
   // Alerta de API Key ausente (Visual apenas para o dev)
   const ApiKeyAlert = () => !hasApiKey ? (
     <div className="bg-red-500/10 border border-red-500/20 p-4 rounded-2xl mb-4 text-[10px] text-red-400 font-bold uppercase tracking-widest leading-relaxed">
-      ⚠️ API_KEY não configurada no Vercel. Vá em "Environment Variables" e adicione API_KEY.
+      ⚠️ API_KEY não configurada na Vercel. Vá em "Settings > Environment Variables".
     </div>
   ) : null;
 
