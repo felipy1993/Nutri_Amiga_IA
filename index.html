@@ -24,6 +24,16 @@
         .animate-pulse-slow { animation: pulse-slow 30s infinite ease-in-out; }
         body { -webkit-tap-highlight-color: transparent; outline: none; }
         input, button, textarea { -webkit-tap-highlight-color: transparent; }
+        
+        .glass-card {
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .safe-area-bottom {
+            padding-bottom: env(safe-area-inset-bottom, 24px);
+        }
     </style>
 <script type="importmap">
 {
@@ -32,13 +42,14 @@
     "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
     "react/": "https://esm.sh/react@^19.2.3/",
     "@google/genai": "https://esm.sh/@google/genai@^1.37.0",
+    "firebase/": "https://esm.sh/firebase@^12.8.0/",
     "vite": "https://esm.sh/vite@^7.3.1",
     "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2"
   }
 }
 </script>
 </head>
-<body class="bg-[#020617] text-slate-100 font-sans antialiased">
+<body class="bg-[#020617] text-slate-100 font-sans antialiased overflow-x-hidden">
     <div id="root"></div>
     <script type="module" src="/index.tsx"></script>
 </body>
