@@ -468,7 +468,7 @@ const App: React.FC = () => {
       let prompt = "";
       if (mode === 'exercise') prompt = `REGISTRO EXERCÍCIO: O usuário fez "${inputVal}". Informe calorias gastas aproximadas.`;
       else if (mode === 'meal') prompt = `REGISTRO ALIMENTAR: O usuário comeu "${inputVal}" no ${mealTypeContext || 'momento'}. Detalhe cada item com peso e calorias.`;
-      else prompt = `GELADEIRA INTELIGENTE: O usuário tem na geladeira: "${inputVal}". Crie uma sugestão de refeição saudável e equilibrada detalhando cada ingrediente usado, peso e calorias.`;
+      else prompt = `GELADEIRA INTELIGENTE / CHEF: O usuário tem: "${inputVal}". Crie uma RECEITA ou COMBINAÇÃO deliciosa usando esses ingredientes. Dê um nome criativo ao prato, explique brevemente o preparo e por que é bom. SÓ DEPOIS liste os ingredientes estimados nas tags padrão para cálculo calórico.`;
       const text = await callGemini(prompt);
       const parsed = parseAIResponse(text);
       setFeedback(parsed.feedback);
