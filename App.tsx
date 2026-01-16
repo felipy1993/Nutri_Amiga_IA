@@ -1,44 +1,35 @@
 
-import React, { useState, useEffect } from 'react';
-import { GoogleGenAI } from "@google/genai";
-import { db, auth, googleProvider } from './firebaseConfig';
-import { 
-  signInWithPopup, 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
-  onAuthStateChanged, 
-  signOut,
-  User,
-  sendPasswordResetEmail
-} from 'firebase/auth';
-import { 
-  doc, 
-  setDoc, 
-  getDoc, 
-  collection, 
-  onSnapshot, 
-  query, 
-  where,
-  orderBy,
-  deleteDoc
-} from 'firebase/firestore';
+import React, { useState, useEffect, useRef } from 'react';
+import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
 
-const SYSTEM_INSTRUCTION = `Você é uma Inteligência Artificial que atua como guia alimentar e de saúde diário (NutriAmiga).
+const SYSTEM_INSTRUCTION = `Você é uma Inteligência Artificial que atua como guia alimentar e de saúde diário.
 Seu papel é ajudar pessoas comuns a comerem melhor e se manterem ativas.
-Responda sempre de forma curta, motivadora e humana. Use emojis.
+
+MODOS DE OPERAÇÃO:
+1. REGISTRO ALIMENTAR: Analise o que o usuário comeu, dê feedback e estime calorias.
+2. SUGESTÃO ALIMENTAR: Sugira refeições com o que o usuário tem em casa.
+3. EXERCÍCIO: Estime o gasto calórico de uma atividade física descrita pelo usuário.
+4. SAÚDE: Você sabe calcular IMC e peso ideal.
+
 REGRAS:
-- Ao analisar uma refeição, seja específica sobre os benefícios ou pontos de atenção.
-- SEMPRE retorne no final do texto a tag: [STATUS:COR][CALORIES:NUMERO][TYPE:MEAL|EXERCISE]
-- STATUS pode ser: VERDE (saudável), AMARELO (moderado), AZUL (treino/proteico).`;
+- Linguagem motivadora e simples.
+- SEMPRE retorne no final do texto a tag: [STATUS:COR][CALORIES:NUMERO][TYPE:MEAL|EXERCISE]`;
 
 interface UserData {
   name: string;
+  birthDate: string;
+  age: string;
+  gender: string;
   weight: string;
   height: string;
   goal: string;
-  activityLevel: string;
+  activityLevel: 'sedentario' | 'leve' | 'moderado' | 'intenso';
   calorieGoal: number;
-  onboardingComplete: boolean;
+}
+
+interface ChatMessage {
+  role: 'user' | 'model';
+  text: string;
 }
 
 interface MealRecord {
@@ -58,156 +49,150 @@ interface ExerciseRecord {
   caloriesBurned: number;
 }
 
-const App: React.FC = () => {
-  // Auth State
-  const [user, setUser] = useState<User | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
-  const [isRegistering, setIsRegistering] = useState(false);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [authError, setAuthError] = useState('');
-  const [isLoggingWithGoogle, setIsLoggingWithGoogle] = useState(false);
+interface WeightLog {
+  date: string;
+  weight: number;
+}
 
-  // App Core State
+const App: React.FC = () => {
   const [step, setStep] = useState<number>(0);
-  const [userData, setUserData] = useState<UserData | null>(null);
+  const [userData, setUserData] = useState<UserData>({
+    name: '', birthDate: '', age: '', gender: '', weight: '', height: '', goal: '', activityLevel: 'sedentario', calorieGoal: 2000
+  });
+  
   const [meals, setMeals] = useState<MealRecord[]>([]);
   const [exercises, setExercises] = useState<ExerciseRecord[]>([]);
+  const [weightHistory, setWeightHistory] = useState<WeightLog[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
-  const [waterGlasses, setWaterGlasses] = useState(0);
+  const [waterGlasses, setWaterGlasses] = useState<number>(0);
+  const [dailyTip, setDailyTip] = useState<string>('');
 
-  // UI State
-  const [activeTab, setActiveTab] = useState<'home' | 'history' | 'profile'>('home');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [inputVal, setInputVal] = useState('');
-  const [feedback, setFeedback] = useState<string | null>(null);
-  const [mode, setMode] = useState<'meal' | 'exercise'>('meal');
+  const [hasApiKey, setHasApiKey] = useState(true);
 
-  // Onboarding temporary
-  const [onboardingName, setOnboardingName] = useState('');
+  const [onboardingBirthDate, setOnboardingBirthDate] = useState('');
+  const [onboardingGender, setOnboardingGender] = useState('');
   const [onboardingWeight, setOnboardingWeight] = useState('');
   const [onboardingHeight, setOnboardingHeight] = useState('');
 
-  // 1. Monitorar Autenticação
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      setUser(firebaseUser);
-      if (firebaseUser) {
-        const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
-        if (userDoc.exists() && userDoc.data().onboardingComplete) {
-          setUserData(userDoc.data() as UserData);
-          setStep(6); // Home
-        } else {
-          setOnboardingName(firebaseUser.displayName || '');
-          setStep(1); // Onboarding
+  const [inputVal, setInputVal] = useState('');
+  const [mealTypeContext, setMealTypeContext] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [mode, setMode] = useState<'meal' | 'suggest' | 'exercise'>('meal');
+
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatting, setIsChatting] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Helper para chamadas Gemini com Retry e Backoff Exponencial (ajuda com erro 429)
+  const callGemini = async (prompt: string, model: string = 'gemini-3-flash-preview', retries: number = 3): Promise<string> => {
+    let lastError: any = null;
+    for (let i = 0; i < retries; i++) {
+      try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const response = await ai.models.generateContent({
+          model: model,
+          contents: prompt,
+          config: { systemInstruction: SYSTEM_INSTRUCTION }
+        });
+        return response.text || "";
+      } catch (err: any) {
+        lastError = err;
+        // Se for 429, espera e tenta de novo
+        if (err?.status === 429 || err?.message?.includes('429')) {
+          const waitTime = Math.pow(2, i) * 1000;
+          await new Promise(r => setTimeout(r, waitTime));
+          continue;
         }
-      } else {
-        setStep(-1); // Login
+        throw err;
       }
-      setAuthLoading(false);
-    });
-    return () => unsubscribe();
+    }
+    throw lastError;
+  };
+
+  useEffect(() => {
+    const apiKey = process.env.API_KEY;
+    if (!apiKey || apiKey === 'undefined' || apiKey === '""') {
+      setHasApiKey(false);
+    } else {
+      setHasApiKey(true);
+    }
+
+    try {
+      const saved = localStorage.getItem('nutri_user_data');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.name) {
+          setUserData(parsed);
+          const savedMeals = localStorage.getItem('nutri_meals_history');
+          const savedExercises = localStorage.getItem('nutri_exercises_history');
+          const savedWeight = localStorage.getItem('nutri_weight_history');
+          if (savedMeals) setMeals(JSON.parse(savedMeals));
+          if (savedExercises) setExercises(JSON.parse(savedExercises));
+          if (savedWeight) setWeightHistory(JSON.parse(savedWeight));
+          setStep(6);
+          return;
+        }
+      }
+      setStep(1);
+    } catch (e) {
+      setStep(1);
+    }
   }, []);
 
-  // 2. Monitorar Dados em Tempo Real (Refeições e Stats)
   useEffect(() => {
-    if (!user || step < 6) return;
+    if (step === 5) {
+      const timer = setTimeout(() => setStep(6), 2500);
+      return () => clearTimeout(timer);
+    }
+  }, [step]);
 
-    const qMeals = query(
-      collection(db, "users", user.uid, "meals"), 
-      where("date", "==", selectedDate)
-    );
-    const unsubMeals = onSnapshot(qMeals, (snapshot) => {
-      setMeals(snapshot.docs.map(d => d.data() as MealRecord));
-    });
+  useEffect(() => {
+    if (step >= 6) {
+      const savedWater = localStorage.getItem(`nutri_water_${selectedDate}`);
+      const savedTip = localStorage.getItem(`nutri_tip_${selectedDate}`);
+      setWaterGlasses(savedWater ? parseInt(savedWater) : 0);
+      setDailyTip(savedTip || '');
+      if (!savedTip && step === 6 && userData.name && hasApiKey) generateDailyTip(selectedDate);
+    }
+  }, [selectedDate, step, userData, hasApiKey]);
 
-    const qExercises = query(
-      collection(db, "users", user.uid, "exercises"),
-      where("date", "==", selectedDate)
-    );
-    const unsubEx = onSnapshot(qExercises, (snapshot) => {
-      setExercises(snapshot.docs.map(d => d.data() as ExerciseRecord));
-    });
+  useEffect(() => {
+    if (step >= 6) {
+      localStorage.setItem(`nutri_water_${selectedDate}`, waterGlasses.toString());
+    }
+  }, [waterGlasses, selectedDate, step]);
 
-    const unsubStats = onSnapshot(doc(db, "users", user.uid, "daily_stats", selectedDate), (docSnap) => {
-      if (docSnap.exists()) setWaterGlasses(docSnap.data().water || 0);
-      else setWaterGlasses(0);
-    });
-
-    return () => { unsubMeals(); unsubEx(); unsubStats(); };
-  }, [user, step, selectedDate]);
-
-  // Handlers Autenticação
-  const handleGoogleLogin = async () => {
-    setIsLoggingWithGoogle(true);
-    setAuthError('');
+  const generateDailyTip = async (date: string) => {
+    if (!hasApiKey) return;
     try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (err: any) {
-      if (err.code === 'auth/unauthorized-domain') {
-        setAuthError(`Domínio não autorizado: ${window.location.hostname}. Adicione-o no console do Firebase.`);
-      } else {
-        setAuthError("Erro ao entrar com Google. Tente novamente.");
-      }
-    } finally {
-      setIsLoggingWithGoogle(false);
+      const prompt = `Gere uma dica de saúde curta para ${userData.name}. Máximo 15 palavras.`;
+      const text = await callGemini(prompt);
+      const tip = text || "Beba água e mantenha o foco!";
+      setDailyTip(tip);
+      localStorage.setItem(`nutri_tip_${date}`, tip);
+    } catch (e) {
+      setDailyTip("A constância é a chave do seu sucesso!");
     }
   };
 
-  const handleEmailAuth = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthError('');
-    try {
-      if (isRegistering) await createUserWithEmailAndPassword(auth, email, password);
-      else await signInWithEmailAndPassword(auth, email, password);
-    } catch (err: any) {
-      setAuthError("Dados incorretos ou e-mail já em uso.");
-    }
-  };
-
-  const handleLogout = async () => {
-    await signOut(auth);
-    setUserData(null);
-    setStep(-1);
-    setIsSettingsOpen(false);
-  };
-
-  // Handlers Onboarding
-  const handleOnboardingSubmit = async () => {
-    if (!user) return;
-    const weightNum = parseFloat(onboardingWeight) || 70;
-    const data: UserData = {
-      name: onboardingName,
-      weight: onboardingWeight,
-      height: onboardingHeight,
-      goal: 'Saúde',
-      activityLevel: 'moderado',
-      calorieGoal: Math.round(weightNum * 33),
-      onboardingComplete: true
-    };
-    await setDoc(doc(db, "users", user.uid), data);
-    setUserData(data);
-    setStep(6);
-  };
-
-  // Handler Registro com IA
   const handleEntryRegistration = async () => {
-    if (!inputVal || !user || !userData) return;
+    if (!inputVal) return;
     setIsAnalyzing(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      let prompt = mode === 'exercise' 
-        ? `EXERCÍCIO: Fiz "${inputVal}". Peso atual: ${userData.weight}kg. [STATUS:VERDE][CALORIES:NUM][TYPE:EXERCISE]`
-        : `REFEIÇÃO: Comi "${inputVal}". [STATUS:COR][CALORIES:NUM][TYPE:MEAL]`;
+      if (!hasApiKey) throw new Error("API Key missing");
+      let prompt = "";
+      if (mode === 'exercise') {
+        prompt = `EXERCÍCIO: Fez "${inputVal}". Peso: ${userData.weight}kg. [STATUS:VERDE][CALORIES:NUM][TYPE:EXERCISE]`;
+      } else if (mode === 'meal') {
+        prompt = `REGISTRO: Comeu "${inputVal}" no ${mealTypeContext}. [STATUS:COR][CALORIES:NUM][TYPE:MEAL]`;
+      } else {
+        prompt = `SUGESTÃO: Ingredientes "${inputVal}". [STATUS:VERDE][CALORIES:NUM][TYPE:MEAL]`;
+      }
       
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: prompt,
-        config: { systemInstruction: SYSTEM_INSTRUCTION }
-      });
-      
-      const text = response.text || "";
+      const text = await callGemini(prompt);
       const cleanedFeedback = text.split('[STATUS:')[0];
       setFeedback(cleanedFeedback);
       
@@ -215,362 +200,424 @@ const App: React.FC = () => {
       const valMatch = text.match(/\[CALORIES:(\d+)\]/);
       if (valMatch) val = parseInt(valMatch[1]);
 
-      const id = Date.now().toString();
       if (mode === 'exercise') {
-        await setDoc(doc(db, "users", user.uid, "exercises", id), { 
-          id, date: selectedDate, description: inputVal, caloriesBurned: val || 200 
-        });
-      } else {
+        const newEx: ExerciseRecord = { id: Date.now().toString(), date: selectedDate, description: inputVal, caloriesBurned: val || 200 };
+        const updated = [...exercises, newEx];
+        setExercises(updated);
+        localStorage.setItem('nutri_exercises_history', JSON.stringify(updated));
+      } else if (mode === 'meal') {
         let status: 'verde' | 'amarelo' | 'azul' = 'verde';
         if (text.includes('STATUS:AMARELO')) status = 'amarelo';
-        if (text.includes('STATUS:AZUL')) status = 'azul';
-        
-        await setDoc(doc(db, "users", user.uid, "meals", id), { 
-          id, date: selectedDate, type: "Registro", description: inputVal, feedback: cleanedFeedback, status, calories: val || 300 
-        });
+        else if (text.includes('STATUS:AZUL')) status = 'azul';
+
+        const newMeal: MealRecord = { id: Date.now().toString(), date: selectedDate, type: mealTypeContext || "Lanche", description: inputVal, feedback: cleanedFeedback, status, calories: val || 300 };
+        const updated = [...meals, newMeal];
+        setMeals(updated);
+        localStorage.setItem('nutri_meals_history', JSON.stringify(updated));
       }
-    } catch (e) {
-      setFeedback("Salvei seu registro! No momento não consegui analisar com detalhes, mas está tudo anotado. 💪");
+    } catch (error) {
+      setFeedback("Não consegui analisar agora devido ao tráfego intenso, mas o registro foi salvo localmente!");
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  const updateWater = async (val: number) => {
-    if (!user) return;
-    setWaterGlasses(val);
-    await setDoc(doc(db, "users", user.uid, "daily_stats", selectedDate), { water: val }, { merge: true });
+  const calculateDailyCalories = (dateStr: string) => {
+    const consumed = meals.filter(m => m.date === dateStr).reduce((s, m) => s + (m.calories || 0), 0);
+    const burned = exercises.filter(e => e.date === dateStr).reduce((s, e) => s + (e.caloriesBurned || 0), 0);
+    return { consumed, burned, net: consumed - burned };
   };
 
-  if (authLoading) return (
-    <div className="flex min-h-screen bg-[#020617] justify-center items-center">
-      <div className="w-12 h-12 border-4 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin"></div>
+  const getWeekDays = () => {
+    const days = [];
+    const today = new Date();
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - i);
+      days.push(d.toISOString().split('T')[0]);
+    }
+    return days;
+  };
+
+  const handleSendMessage = async () => {
+    if (!chatInput.trim() || isChatting) return;
+    const userMsg: ChatMessage = { role: 'user', text: chatInput };
+    const currentMsgs = [...chatMessages, userMsg];
+    setChatMessages(currentMsgs);
+    setChatInput('');
+    setIsChatting(true);
+    try {
+      if (!hasApiKey) throw new Error("API Key missing");
+      const prompt = `Conversa atual: ${currentMsgs.map(m => `${m.role}: ${m.text}`).join('\n')}\nResponda como a Nutri IA.`;
+      const text = await callGemini(prompt, 'gemini-3-flash-preview');
+      setChatMessages(prev => [...prev, { role: 'model', text: text || "..." }]);
+    } catch (error) {
+      setChatMessages(prev => [...prev, { role: 'model', text: "Muitas requisições agora. Pode tentar novamente em alguns segundos?" }]);
+    } finally {
+      setIsChatting(false);
+      setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+    }
+  };
+
+  const getDayLabel = (dateStr: string) => {
+    const todayStr = new Date().toISOString().split('T')[0];
+    if (dateStr === todayStr) return "Hoje";
+    const d = new Date(dateStr + 'T00:00:00');
+    return d.toLocaleDateString('pt-BR', { weekday: 'short' });
+  };
+
+  const calculateBMI = () => {
+    const w = parseFloat(userData.weight);
+    const h = parseFloat(userData.height) / 100;
+    return (w && h) ? w / (h * h) : 0;
+  };
+
+  const getBMICategory = (bmi: number) => {
+    if (bmi < 18.5) return { label: 'Abaixo do peso', color: 'text-blue-400' };
+    if (bmi < 25) return { label: 'Peso normal', color: 'text-emerald-400' };
+    if (bmi < 30) return { label: 'Sobrepeso', color: 'text-amber-400' };
+    return { label: 'Obesidade', color: 'text-red-400' };
+  };
+
+  const ApiKeyAlert = () => !hasApiKey ? (
+    <div className="bg-red-500/10 border border-red-500/20 p-4 rounded-2xl mb-4 text-[10px] text-red-400 font-bold uppercase tracking-widest">
+      ⚠️ API_KEY não configurada na Vercel. Adicione em Environment Variables.
     </div>
-  );
+  ) : null;
 
-  // TELA LOGIN
-  if (step === -1) {
+  if (step === 0) {
     return (
-      <div className="flex flex-col min-h-screen bg-[#020617] text-white p-8 justify-center items-center relative overflow-hidden">
-        <div className="absolute top-[-20%] left-[-20%] w-[120%] h-[70%] bg-emerald-500/10 blur-[150px] rounded-full animate-pulse-slow"></div>
-        
-        <div className="w-full max-w-sm space-y-8 z-10 animate-in fade-in duration-1000">
-          <div className="text-center space-y-4">
-            <div className="inline-block p-5 bg-emerald-500/10 rounded-[2rem] border border-emerald-500/20 shadow-2xl shadow-emerald-500/5">
-                <span className="text-5xl">🥗</span>
-            </div>
-            <h1 className="text-5xl font-black tracking-tighter">Nutri<span className="text-emerald-400">Amiga</span></h1>
-            <p className="text-slate-500 font-bold uppercase tracking-[0.3em] text-[10px]">Evolução com Inteligência</p>
-          </div>
-
-          <div className="glass-card p-8 rounded-[2.5rem] shadow-2xl space-y-6">
-            <form onSubmit={handleEmailAuth} className="space-y-4">
-              <input 
-                type="email" placeholder="Seu e-mail" 
-                className="w-full bg-black/40 border border-white/5 p-5 rounded-2xl outline-none focus:border-emerald-500/40 transition-all text-sm"
-                value={email} onChange={e => setEmail(e.target.value)}
-              />
-              <input 
-                type="password" placeholder="Sua senha" 
-                className="w-full bg-black/40 border border-white/5 p-5 rounded-2xl outline-none focus:border-emerald-500/40 transition-all text-sm"
-                value={password} onChange={e => setPassword(e.target.value)}
-              />
-              {authError && <div className="text-[10px] text-red-400 font-black uppercase text-center bg-red-400/10 p-3 rounded-xl">{authError}</div>}
-              <button type="submit" className="w-full bg-emerald-500 py-5 rounded-2xl font-black uppercase tracking-widest shadow-lg shadow-emerald-500/20 active:scale-95 transition-all">
-                {isRegistering ? "Criar Minha Conta" : "Entrar Agora"}
-              </button>
-            </form>
-
-            <button onClick={() => setIsRegistering(!isRegistering)} className="w-full text-[10px] font-black uppercase text-slate-500">
-                {isRegistering ? "Já tenho conta" : "Não tem conta? Cadastrar"}
-            </button>
-
-            <div className="relative flex items-center gap-4 py-2">
-              <div className="flex-1 border-t border-white/5"></div>
-              <span className="text-[9px] font-black text-slate-600 uppercase">Ou entre com</span>
-              <div className="flex-1 border-t border-white/5"></div>
-            </div>
-
-            <button 
-              onClick={handleGoogleLogin} 
-              disabled={isLoggingWithGoogle}
-              className="w-full bg-white text-black py-4 rounded-2xl font-black uppercase flex items-center justify-center gap-3 active:scale-95 transition-all shadow-xl"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.1c-.22-.66-.35-1.36-.35-2.1s.13-1.44.35-2.1V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-              Google
-            </button>
-          </div>
-        </div>
+      <div className="flex flex-col min-h-screen bg-[#020617] justify-center items-center">
+        <div className="w-12 h-12 border-4 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin"></div>
       </div>
     );
   }
 
-  // TELA DASHBOARD
   if (step >= 6) {
-    const consumed = meals.reduce((s, m) => s + (m.calories || 0), 0);
-    const burned = exercises.reduce((s, e) => s + (e.caloriesBurned || 0), 0);
-    const totalMeta = (userData?.calorieGoal || 2000) + burned;
-    const progressPercent = Math.min(100, (consumed / totalMeta) * 100);
+    const stats = calculateDailyCalories(selectedDate);
+    const isViewingToday = selectedDate === new Date().toISOString().split('T')[0];
+    const totalMeta = userData.calorieGoal + stats.burned;
+    const progressPercent = Math.min(100, (stats.consumed / totalMeta) * 100);
 
     return (
-      <div className="flex flex-col min-h-screen bg-[#020617] text-slate-100">
-        <header className="px-6 pt-12 pb-6 bg-[#0f172a]/80 backdrop-blur-2xl border-b border-white/5 sticky top-0 z-[100] flex justify-between items-center">
+      <div className="flex flex-col min-h-screen bg-[#020617] text-slate-100 pb-32 font-sans overflow-x-hidden">
+        <div className="fixed top-[-10%] left-[-10%] w-[80%] h-[40%] bg-emerald-500/10 blur-[120px] rounded-full pointer-events-none"></div>
+        <div className="fixed bottom-[-10%] right-[-10%] w-[60%] h-[40%] bg-blue-600/10 blur-[120px] rounded-full pointer-events-none"></div>
+
+        <header className="px-6 pt-12 pb-6 bg-[#0f172a]/40 backdrop-blur-2xl border-b border-white/5 sticky top-0 z-[100] flex justify-between items-center">
           <div>
-            <h1 className="text-xl font-black text-emerald-400 tracking-tighter uppercase leading-none">Nutri<span className="text-white">Amiga</span></h1>
-            <p className="text-slate-500 text-[10px] font-black uppercase opacity-60 mt-1">Oi, {userData?.name.split(' ')[0] || 'Nutri'}! 👋</p>
+            <h1 className="text-xl font-black text-emerald-400 font-mono tracking-tighter uppercase leading-none">Nutri<span className="text-white">Amiga</span></h1>
+            <p className="text-slate-400 text-[10px] mt-1 font-bold uppercase tracking-[0.2em] opacity-60">Olá, {userData.name.split(' ')[0]}!</p>
           </div>
-          <button onClick={() => setIsSettingsOpen(true)} className="w-10 h-10 glass-card rounded-2xl flex items-center justify-center text-slate-400 active:scale-90 transition-transform">
-             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <button onClick={() => setIsSettingsOpen(true)} className="w-10 h-10 bg-white/5 rounded-2xl flex items-center justify-center text-slate-400 border border-white/10">
+             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12.22 2h-.44a2 2 0 0 0-2 2a2 2 0 0 1-2 2a2 2 0 0 0-2 2a2 2 0 0 1-2 2a2 2 0 0 0-2 2v.44a2 2 0 0 0 2 2a2 2 0 0 1 2 2a2 2 0 0 0 2 2a2 2 0 0 1 2 2a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2a2 2 0 0 1 2-2a2 2 0 0 0 2-2a2 2 0 0 1 2-2a2 2 0 0 0 2-2v-.44a2 2 0 0 0-2-2a2 2 0 0 1-2-2a2 2 0 0 0-2-2a2 2 0 0 1-2-2a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
           </button>
         </header>
 
         {isSettingsOpen && (
-          <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 animate-in fade-in duration-300">
-            <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-md" onClick={() => setIsSettingsOpen(false)}></div>
-            <div className="glass-card w-full max-w-sm rounded-[2.5rem] p-8 relative shadow-2xl space-y-6">
-               <div className="flex justify-between items-center mb-2">
-                 <h2 className="text-xl font-black">Seu Perfil</h2>
-                 <button onClick={() => setIsSettingsOpen(false)} className="w-8 h-8 flex items-center justify-center bg-white/5 rounded-full">✕</button>
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-6">
+            <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md" onClick={() => setIsSettingsOpen(false)}></div>
+            <div className="bg-slate-900 border border-white/10 w-full max-w-sm rounded-[2.5rem] p-8 relative shadow-2xl">
+               <div className="flex justify-between items-center mb-6">
+                 <h2 className="text-xl font-black">Ajustes</h2>
+                 <button onClick={() => setIsSettingsOpen(false)} className="text-slate-500 text-xl">✕</button>
                </div>
-               <div className="space-y-4">
-                 <div className="bg-white/5 p-4 rounded-3xl border border-white/5">
-                    <p className="text-[10px] font-black uppercase text-slate-500 mb-1">E-mail</p>
-                    <p className="text-sm font-bold truncate">{user?.email}</p>
-                 </div>
-                 <div className="grid grid-cols-2 gap-4">
-                    <div className="bg-white/5 p-4 rounded-3xl border border-white/5">
-                        <p className="text-[10px] font-black uppercase text-slate-500">Peso</p>
-                        <p className="text-lg font-black">{userData?.weight}kg</p>
-                    </div>
-                    <div className="bg-white/5 p-4 rounded-3xl border border-white/5">
-                        <p className="text-[10px] font-black uppercase text-slate-500">Altura</p>
-                        <p className="text-lg font-black">{userData?.height}cm</p>
-                    </div>
-                 </div>
-               </div>
-               <button onClick={handleLogout} className="w-full bg-red-500/10 border border-red-500/20 text-red-400 py-5 rounded-3xl font-black text-[10px] uppercase tracking-widest active:scale-95 transition-all">Sair da Conta</button>
+               <ApiKeyAlert />
+               <button onClick={() => { if(confirm("Apagar tudo?")) { localStorage.clear(); window.location.reload(); } }} className="w-full border border-red-500/30 text-red-400 p-4 rounded-2xl font-black text-xs uppercase tracking-widest">Resetar Aplicativo</button>
             </div>
           </div>
         )}
 
-        <main className="p-6 pb-32 space-y-8 max-w-md mx-auto w-full flex-1">
-          {activeTab === 'home' && step === 6 && (
-            <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
-              <section className="bg-gradient-to-br from-emerald-600 to-emerald-800 border border-emerald-500/20 rounded-[2.5rem] p-8 shadow-2xl shadow-emerald-500/10 space-y-6">
-                <div className="flex justify-between items-end text-white">
+        <main className="p-6 space-y-6 max-w-md mx-auto w-full flex-1">
+          {step === 6 && (
+            <div className="space-y-6 animate-in slide-in-from-bottom-4 duration-500">
+              <ApiKeyAlert />
+              <section className="bg-gradient-to-br from-slate-900 to-slate-950 border border-white/5 rounded-[2.5rem] p-8 shadow-2xl space-y-6">
+                <div className="flex justify-between items-end">
                   <div className="space-y-1">
-                    <p className="text-[10px] font-black uppercase text-emerald-100/60 tracking-widest">Calorias Hoje</p>
-                    <h3 className="text-5xl font-black">{consumed} <span className="text-sm opacity-60 font-medium">kcal</span></h3>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Consumido hoje</p>
+                    <h3 className="text-4xl font-black tracking-tight">{stats.consumed} <span className="text-sm text-slate-500 uppercase">kcal</span></h3>
                   </div>
-                  <div className="text-right">
-                    <p className="text-[10px] font-black text-emerald-100 uppercase tracking-widest">Restante</p>
-                    <h4 className="text-2xl font-black">{Math.max(0, totalMeta - consumed)}</h4>
+                  <div className="text-right space-y-1">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-emerald-400">Atividade</p>
+                    <h4 className="text-xl font-black text-emerald-400">+{stats.burned} <span className="text-[10px]">kcal</span></h4>
                   </div>
                 </div>
-                <div className="h-5 w-full bg-black/20 rounded-full overflow-hidden p-1 shadow-inner">
-                  <div className="h-full bg-white rounded-full transition-all duration-1000 shadow-[0_0_15px_rgba(255,255,255,0.4)]" style={{ width: `${progressPercent}%` }}></div>
+                <div className="space-y-3">
+                  <div className="h-4 w-full bg-white/5 rounded-full overflow-hidden p-1">
+                    <div className="h-full bg-emerald-500 rounded-full transition-all duration-1000" style={{ width: `${progressPercent}%` }}></div>
+                  </div>
+                  <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-widest text-slate-500">
+                     <span>Restam {(totalMeta - stats.consumed).toFixed(0)} kcal</span>
+                     <span className="text-white bg-white/5 px-3 py-1 rounded-full">Meta: {totalMeta}</span>
+                  </div>
+                </div>
+              </section>
+
+              <section className="bg-emerald-500/5 border border-emerald-500/10 rounded-3xl p-5 flex items-start gap-4">
+                <div className="text-2xl mt-1">✨</div>
+                <div>
+                  <h4 className="text-[10px] font-black uppercase tracking-widest text-emerald-400 mb-1">Dica Inteligente</h4>
+                  <p className="text-xs text-slate-300 font-medium italic">"{dailyTip || "Focando no progresso..."}"</p>
                 </div>
               </section>
 
               <div className="grid grid-cols-2 gap-4">
-                <section className="glass-card p-6 rounded-[2rem] text-center space-y-3">
-                  <h4 className="text-[10px] font-black uppercase text-blue-400 tracking-widest">Água Diária</h4>
-                  <div className="flex items-center justify-center gap-4">
-                    <button onClick={() => updateWater(Math.max(0, waterGlasses - 1))} className="w-10 h-10 rounded-2xl bg-white/5 font-black active:bg-white/10 transition-colors">－</button>
-                    <span className="text-3xl font-black">{waterGlasses}</span>
-                    <button onClick={() => updateWater(waterGlasses + 1)} className="w-10 h-10 rounded-2xl bg-blue-500/20 text-blue-400 font-black">＋</button>
+                <section className="bg-slate-900/40 border border-white/5 p-6 rounded-[2rem] text-center space-y-3">
+                  <h4 className="text-[10px] font-black uppercase tracking-widest text-blue-400">Água</h4>
+                  <div className="flex items-center justify-center gap-3">
+                    <button onClick={() => setWaterGlasses(Math.max(0, waterGlasses - 1))} className="w-8 h-8 rounded-full bg-white/5 font-black">-</button>
+                    <span className="text-2xl font-black">{waterGlasses}</span>
+                    <button onClick={() => setWaterGlasses(waterGlasses + 1)} className="w-8 h-8 rounded-full bg-blue-500/20 text-blue-400 font-black">+</button>
                   </div>
                 </section>
-                <section className="glass-card p-6 rounded-[2rem] text-center space-y-2 flex flex-col justify-center items-center">
-                  <h4 className="text-[10px] font-black uppercase text-emerald-400 tracking-widest">Atividade</h4>
-                  <div className="text-3xl font-black">-{burned} <span className="text-xs text-slate-500 font-medium">kcal</span></div>
+                <section onClick={() => setStep(11)} className="bg-slate-900/40 border border-white/5 p-6 rounded-[2rem] text-center space-y-2 cursor-pointer">
+                  <h4 className="text-[10px] font-black uppercase tracking-widest text-emerald-400">Peso</h4>
+                  <div className="flex items-baseline justify-center gap-1">
+                    <span className="text-2xl font-black">{userData.weight}</span>
+                    <span className="text-xs font-black text-slate-500">kg</span>
+                  </div>
                 </section>
               </div>
 
-              <div className="space-y-4">
-                 <button onClick={() => { setMode('meal'); setStep(9); }} className="w-full bg-emerald-500/10 border border-emerald-500/20 p-8 rounded-[2.5rem] flex items-center justify-between active:scale-95 transition-all group">
-                    <div className="flex items-center gap-5">
-                        <div className="w-14 h-14 bg-emerald-500/20 rounded-3xl flex items-center justify-center text-3xl group-hover:scale-110 transition-transform">🥗</div>
-                        <div className="text-left">
-                            <h4 className="font-black text-emerald-400 text-sm">Registrar Comida</h4>
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">A IA analisa o que você comeu</p>
-                        </div>
-                    </div>
-                    <span className="text-emerald-500/40 font-black text-2xl">→</span>
+              <div className="grid grid-cols-2 gap-4">
+                 <button onClick={() => { setMode('meal'); setMealTypeContext(null); setStep(9); }} className="bg-emerald-500/10 border border-emerald-500/20 p-6 rounded-[2.5rem] flex flex-col items-center gap-2">
+                    <span className="text-3xl">🥗</span>
+                    <span className="text-[10px] font-black uppercase tracking-widest">Comi algo</span>
                  </button>
-                 <button onClick={() => { setMode('exercise'); setStep(9); }} className="w-full bg-blue-500/10 border border-blue-500/20 p-8 rounded-[2.5rem] flex items-center justify-between active:scale-95 transition-all group">
-                    <div className="flex items-center gap-5">
-                        <div className="w-14 h-14 bg-blue-500/20 rounded-3xl flex items-center justify-center text-3xl group-hover:scale-110 transition-transform">🏃‍♂️</div>
-                        <div className="text-left">
-                            <h4 className="font-black text-blue-400 text-sm">Registrar Treino</h4>
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Desconte calorias do seu dia</p>
-                        </div>
-                    </div>
-                    <span className="text-blue-500/40 font-black text-2xl">→</span>
+                 <button onClick={() => { setMode('exercise'); setStep(9); }} className="bg-blue-500/10 border border-blue-500/20 p-6 rounded-[2.5rem] flex flex-col items-center gap-2">
+                    <span className="text-3xl">🏃‍♂️</span>
+                    <span className="text-[10px] font-black uppercase tracking-widest">Treinei</span>
                  </button>
               </div>
             </div>
           )}
 
-          {activeTab === 'history' && (
-            <div className="space-y-6 animate-in slide-in-from-right duration-500">
-               <div className="flex justify-between items-center mb-2">
-                 <h2 className="text-2xl font-black">Meu Diário</h2>
-                 <input 
-                    type="date" value={selectedDate} 
-                    onChange={(e) => setSelectedDate(e.target.value)} 
-                    className="bg-white/5 border border-white/5 rounded-xl px-3 py-1.5 text-xs font-black outline-none focus:border-emerald-500/40"
-                 />
+          {step === 10 && (
+            <div className="space-y-6 animate-in fade-in pb-20">
+               <div className="flex justify-between items-center">
+                 <h2 className="text-2xl font-black tracking-tighter">Diário</h2>
+                 <p className="text-sm font-black text-emerald-400">{stats.net} kcal</p>
                </div>
                
-               {meals.length === 0 && exercises.length === 0 ? (
-                 <div className="glass-card p-16 rounded-[2.5rem] text-center space-y-4 border-dashed border-white/10 opacity-60">
-                    <span className="text-6xl block">📝</span>
-                    <p className="text-sm font-bold text-slate-400">Nenhum registro encontrado.</p>
-                 </div>
-               ) : (
-                 <div className="space-y-4">
-                   {meals.map((meal) => (
-                     <div key={meal.id} className="glass-card p-6 rounded-3xl border-l-4 border-emerald-500 flex justify-between items-start gap-4">
-                        <div className="space-y-2 flex-1">
-                            <div className="flex items-center gap-2">
-                                <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${meal.status === 'verde' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
-                                    {meal.calories} kcal
-                                </span>
-                            </div>
-                            <p className="font-bold text-sm leading-snug">"{meal.description}"</p>
-                            {meal.feedback && <p className="text-[10px] text-slate-400 italic font-medium leading-relaxed">✨ {meal.feedback}</p>}
-                        </div>
-                        <div className={`w-3 h-3 rounded-full shrink-0 mt-1 ${meal.status === 'verde' ? 'bg-emerald-500' : 'bg-yellow-500'}`}></div>
-                     </div>
-                   ))}
-                   {exercises.map((ex) => (
-                     <div key={ex.id} className="glass-card p-6 rounded-3xl border-l-4 border-blue-500 flex justify-between items-center gap-4">
-                        <div className="space-y-1">
-                            <span className="text-[9px] font-black uppercase text-blue-400 bg-blue-400/10 px-2 py-0.5 rounded-full">Treino</span>
-                            <p className="font-bold text-sm leading-snug">{ex.description}</p>
-                        </div>
-                        <span className="text-blue-400 font-black">-{ex.caloriesBurned} kcal</span>
-                     </div>
-                   ))}
-                 </div>
-               )}
+               <div className="flex gap-3 overflow-x-auto pb-4 custom-scrollbar">
+                 {getWeekDays().map(dateStr => (
+                   <button 
+                     key={dateStr} 
+                     onClick={() => setSelectedDate(dateStr)} 
+                     className={`flex flex-col items-center min-w-[65px] p-4 rounded-3xl border transition-all ${selectedDate === dateStr ? 'bg-emerald-500 border-emerald-500' : 'bg-slate-900/40 border-white/5'}`}
+                   >
+                     <span className={`text-[8px] font-black uppercase tracking-widest ${selectedDate === dateStr ? 'text-white' : 'text-slate-500'}`}>{getDayLabel(dateStr)}</span>
+                     <span className={`text-lg font-black mt-1 ${selectedDate === dateStr ? 'text-white' : 'text-slate-200'}`}>{dateStr.split('-')[2]}</span>
+                   </button>
+                 ))}
+               </div>
+
+               <div className="space-y-4">
+                 {["Café da Manhã", "Almoço", "Café da Tarde", "Jantar"].map(type => {
+                   const rec = meals.find(m => m.date === selectedDate && m.type === type);
+                   return (
+                     <button key={type} onClick={() => { if(!rec) { setMode('meal'); setMealTypeContext(type); setStep(9); } }} className="w-full text-left bg-slate-900/60 border border-white/5 p-6 rounded-[2rem]">
+                       <div className="flex justify-between items-center mb-3">
+                         <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400">{type}</h4>
+                         {rec && <span className="text-[10px] font-black text-emerald-400">{rec.calories} kcal</span>}
+                       </div>
+                       {rec ? (
+                         <div className="space-y-2">
+                           <p className="font-bold text-sm">"{rec.description}"</p>
+                           <p className="text-[10px] text-slate-500 italic leading-relaxed line-clamp-2">{rec.feedback}</p>
+                         </div>
+                       ) : (
+                         <p className="text-[9px] font-black text-emerald-400/50 uppercase tracking-widest">+ Adicionar</p>
+                       )}
+                     </button>
+                   );
+                 })}
+               </div>
             </div>
           )}
 
           {step === 9 && (
-            <div className="fixed inset-0 z-[160] bg-[#020617] p-8 overflow-y-auto safe-area-bottom animate-in slide-in-from-bottom duration-500">
-               <button onClick={() => { setStep(6); setFeedback(null); setInputVal(''); }} className="text-emerald-400 font-black text-[11px] uppercase tracking-[0.2em] mb-8 flex items-center gap-2">
-                 <span>←</span> VOLTAR PARA HOME
-               </button>
-               
-               <div className="glass-card rounded-[2.5rem] p-8 space-y-6 shadow-2xl">
-                 <h2 className="text-3xl font-black tracking-tighter">O que {mode === 'meal' ? 'você comeu' : 'foi o treino'}?</h2>
-                 <textarea 
-                    value={inputVal} 
-                    onChange={(e) => setInputVal(e.target.value)} 
-                    placeholder={mode === 'meal' ? "Ex: 2 ovos mexidos, uma fatia de pão integral e café sem açúcar..." : "Ex: Corrida leve de 30 minutos no parque..."}
-                    className="w-full h-48 bg-black/40 border border-white/5 rounded-3xl p-6 outline-none text-white resize-none text-sm leading-relaxed placeholder:opacity-30 focus:border-emerald-500/40 transition-all" 
-                 />
-                 <button 
-                    onClick={handleEntryRegistration} 
-                    disabled={isAnalyzing || !inputVal} 
-                    className="w-full py-6 bg-emerald-500 text-white rounded-3xl font-black text-[11px] uppercase tracking-[0.2em] disabled:opacity-50 transition-all active:scale-95 shadow-xl shadow-emerald-500/20"
-                 >
-                    {isAnalyzing ? (
-                        <div className="flex items-center justify-center gap-3">
-                            <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{animationDelay: '0ms'}}></div>
-                            <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{animationDelay: '150ms'}}></div>
-                            <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{animationDelay: '300ms'}}></div>
-                        </div>
-                    ) : 'SALVAR REGISTRO'}
+            <div className="space-y-6 animate-in slide-in-from-bottom-8">
+               <button onClick={() => setStep(isViewingToday ? 6 : 10)} className="text-emerald-400 font-black text-[10px] uppercase tracking-widest">← Voltar</button>
+               <div className="bg-slate-900 border border-white/10 rounded-[2.5rem] p-8 space-y-6">
+                 {mode !== 'exercise' && (
+                   <div className="flex bg-black/40 p-1 rounded-2xl border border-white/5">
+                      <button onClick={() => setMode('meal')} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-xl ${mode === 'meal' ? 'bg-emerald-500 text-white' : 'text-slate-500'}`}>Já comi</button>
+                      <button onClick={() => setMode('suggest')} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-xl ${mode === 'suggest' ? 'bg-emerald-500 text-white' : 'text-slate-500'}`}>Dica IA</button>
+                   </div>
+                 )}
+                 <h2 className="text-2xl font-black tracking-tighter">O que foi?</h2>
+                 <textarea value={inputVal} onChange={(e) => setInputVal(e.target.value)} placeholder="..." className="w-full h-40 bg-black/40 border-2 border-white/5 rounded-3xl p-6 outline-none text-white resize-none" />
+                 <button onClick={handleEntryRegistration} disabled={isAnalyzing || !inputVal} className="w-full py-5 bg-emerald-500 rounded-3xl font-black text-xs uppercase tracking-widest disabled:opacity-50">
+                    {isAnalyzing ? 'Processando...' : 'Salvar'}
                  </button>
                </div>
-               
                {feedback && (
-                 <div className="glass-card p-8 rounded-[2.5rem] mt-6 space-y-5 animate-in zoom-in duration-300">
-                   <div className="flex items-center gap-3">
-                       <span className="text-2xl">✨</span>
-                       <h4 className="text-[10px] font-black uppercase text-emerald-400 tracking-widest">Análise da Nutri</h4>
-                   </div>
-                   <p className="text-sm font-medium italic text-slate-300 leading-relaxed">"{feedback}"</p>
-                   <button 
-                      onClick={() => { setStep(6); setFeedback(null); setInputVal(''); }} 
-                      className="w-full py-4 bg-emerald-500/20 text-emerald-400 rounded-2xl font-black text-[10px] uppercase border border-emerald-500/20"
-                   >
-                      CONTINUAR JORNADA
-                   </button>
+                 <div className="bg-white/5 border border-white/5 p-8 rounded-[2.5rem] space-y-4">
+                   <p className="text-sm font-medium leading-relaxed italic text-slate-300">"{feedback}"</p>
+                   <button onClick={() => { setStep(isViewingToday ? 6 : 10); setFeedback(null); setInputVal(''); }} className="w-full py-4 bg-emerald-500 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest">OK!</button>
                  </div>
                )}
             </div>
           )}
+
+          {step === 8 && (
+            <div className="flex flex-col h-[75vh] animate-in fade-in">
+               <button onClick={() => setStep(6)} className="text-emerald-400 font-black text-[10px] uppercase tracking-widest mb-4">← Sair</button>
+               <div className="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar pb-6">
+                 {chatMessages.map((msg, i) => (
+                   <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                     <div className={`max-w-[85%] p-5 rounded-[2rem] text-sm ${msg.role === 'user' ? 'bg-emerald-600 text-white' : 'bg-slate-900 border border-white/5 text-slate-100'}`}>
+                       {msg.text}
+                     </div>
+                   </div>
+                 ))}
+                 <div ref={chatEndRef} />
+               </div>
+               <div className="bg-slate-900 border border-white/10 p-3 rounded-[2rem] flex gap-2">
+                 <input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()} placeholder="Mensagem..." className="flex-1 bg-transparent px-4 outline-none text-sm" />
+                 <button onClick={handleSendMessage} className="bg-emerald-500 text-white w-12 h-12 rounded-2xl flex items-center justify-center">🚀</button>
+               </div>
+            </div>
+          )}
+
+          {step === 11 && (
+            <div className="space-y-6 animate-in fade-in">
+               <button onClick={() => setStep(6)} className="text-emerald-400 font-black text-[10px] uppercase tracking-widest">← Home</button>
+               <h2 className="text-2xl font-black tracking-tighter">Sua Saúde</h2>
+               <div className="bg-slate-900 border border-white/5 rounded-[2.5rem] p-8 flex flex-col items-center">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">IMC Atual</p>
+                  <span className="text-5xl font-black text-white">{calculateBMI().toFixed(1)}</span>
+                  <span className={`text-xs font-black uppercase mt-2 ${getBMICategory(calculateBMI()).color}`}>{getBMICategory(calculateBMI()).label}</span>
+               </div>
+            </div>
+          )}
         </main>
 
-        <nav className="fixed bottom-8 left-6 right-6 h-20 bg-[#0f172a]/95 backdrop-blur-3xl border border-white/10 rounded-[2.5rem] flex items-center justify-around px-4 z-[150] shadow-2xl safe-area-bottom">
-          <button onClick={() => setActiveTab('home')} className={`flex flex-col items-center gap-1.5 transition-all ${activeTab === 'home' ? 'text-emerald-400 scale-110' : 'text-slate-500'}`}>
+        <nav className="fixed bottom-8 left-6 right-6 h-20 bg-[#0f172a]/80 backdrop-blur-2xl border border-white/10 rounded-[2.5rem] flex items-center justify-around px-4 z-[150] shadow-2xl">
+          <button onClick={() => { setStep(6); setSelectedDate(new Date().toISOString().split('T')[0]); }} className={`flex flex-col items-center gap-1 ${step === 6 ? 'text-emerald-400' : 'text-slate-600'}`}>
             <span className="text-xl">🏠</span>
-            <span className="text-[8px] font-black uppercase tracking-tighter">Home</span>
+            <span className="text-[7px] font-black uppercase">Home</span>
           </button>
-          
+          <button onClick={() => setStep(10)} className={`flex flex-col items-center gap-1 ${step === 10 ? 'text-emerald-400' : 'text-slate-600'}`}>
+            <span className="text-xl">📅</span>
+            <span className="text-[7px] font-black uppercase">Diário</span>
+          </button>
           <div className="relative -top-10">
-            <button 
-                onClick={() => { setMode('meal'); setStep(9); }} 
-                className="w-16 h-16 bg-emerald-500 text-white rounded-[1.8rem] flex items-center justify-center font-black text-3xl shadow-[0_10px_40px_rgba(16,185,129,0.4)] active:scale-90 transition-transform"
-            >
-                ＋
-            </button>
+            <button onClick={() => { setMode('meal'); setMealTypeContext(null); setStep(9); }} className="w-16 h-16 bg-emerald-500 text-white rounded-[1.8rem] flex items-center justify-center font-black text-3xl shadow-xl">+</button>
           </div>
-
-          <button onClick={() => setActiveTab('history')} className={`flex flex-col items-center gap-1.5 transition-all ${activeTab === 'history' ? 'text-emerald-400 scale-110' : 'text-slate-500'}`}>
-            <span className="text-xl">📑</span>
-            <span className="text-[8px] font-black uppercase tracking-tighter">Diário</span>
+          <button onClick={() => setStep(11)} className={`flex flex-col items-center gap-1 ${step === 11 ? 'text-emerald-400' : 'text-slate-600'}`}>
+            <span className="text-xl">📈</span>
+            <span className="text-[7px] font-black uppercase tracking-widest">Saúde</span>
+          </button>
+          <button onClick={() => setStep(8)} className={`flex flex-col items-center gap-1 ${step === 8 ? 'text-emerald-400' : 'text-slate-600'}`}>
+            <span className="text-xl">💬</span>
+            <span className="text-[7px] font-black uppercase tracking-widest">Chat</span>
           </button>
         </nav>
       </div>
     );
   }
 
-  // TELA ONBOARDING
   return (
-    <div className="flex flex-col min-h-screen bg-[#020617] text-white p-10 justify-center items-center relative overflow-hidden">
-      <div className="absolute top-[-20%] left-[-20%] w-[100%] h-[60%] bg-emerald-500/5 blur-[120px] rounded-full animate-pulse"></div>
-
+    <div className="flex flex-col min-h-screen bg-[#020617] text-white font-sans overflow-y-auto">
       {step === 1 && (
-        <div className="w-full max-w-sm space-y-12 text-center animate-in slide-in-from-right duration-500">
-           <div className="space-y-4">
-               <h2 className="text-5xl font-black tracking-tighter">Seja bem-vinda! 👋</h2>
-               <p className="text-slate-400 text-sm leading-relaxed">Vou te ajudar a comer melhor todos os dias. Como posso te chamar?</p>
-           </div>
-           <div className="space-y-6">
-             <input 
-                type="text" placeholder="Seu apelido" 
-                className="w-full bg-white/5 border border-white/10 p-6 rounded-[2rem] text-xl outline-none focus:border-emerald-500/40 text-center font-black transition-all" 
-                value={onboardingName} onChange={e => setOnboardingName(e.target.value)} 
-             />
-             <button onClick={() => setStep(2)} disabled={!onboardingName} className="w-full bg-emerald-500 py-6 rounded-[2.5rem] font-black uppercase tracking-widest disabled:opacity-50 shadow-xl shadow-emerald-500/10 active:scale-95 transition-all">Continuar</button>
-           </div>
+        <div className="flex-1 flex flex-col relative overflow-hidden">
+          <div className="absolute inset-0 bg-[url('https://images.unsplash.com/photo-1517836357463-d25dfeac3438?auto=format&fit=crop&w=1200&q=80')] bg-cover bg-center transition-transform duration-[30s] scale-110 animate-pulse-slow">
+             <div className="absolute inset-0 bg-gradient-to-t from-[#020617] via-[#020617]/70 to-transparent"></div>
+          </div>
+          <div className="relative z-10 flex-1 flex flex-col justify-end p-10 pb-20 text-center space-y-6">
+            <h1 className="text-6xl font-black tracking-tighter">Nutri<span className="text-emerald-400">Amiga</span></h1>
+            <p className="text-slate-400 text-lg font-medium italic">Sua saúde, do seu jeito.</p>
+            <button onClick={() => setStep(2)} className="bg-emerald-500 text-white py-6 rounded-[2.5rem] font-black text-xl uppercase tracking-widest">Bora começar!</button>
+          </div>
         </div>
       )}
 
       {step === 2 && (
-        <div className="w-full max-w-sm space-y-10 animate-in slide-in-from-right duration-500">
-           <div className="space-y-4 text-center">
-               <h2 className="text-4xl font-black tracking-tighter">Quase lá! ⚖️</h2>
-               <p className="text-slate-400 text-sm">Preciso dessas informações para calcular suas calorias ideais.</p>
-           </div>
-           <div className="space-y-5">
-             <div className="grid grid-cols-2 gap-4">
-                 <div className="space-y-3">
-                     <label className="text-[10px] font-black uppercase text-slate-500 ml-6">Peso (kg)</label>
-                     <input type="number" placeholder="70" className="bg-white/5 border border-white/10 p-5 rounded-[2rem] w-full text-center outline-none focus:border-emerald-500/40 font-black text-lg" value={onboardingWeight} onChange={e => setOnboardingWeight(e.target.value)} />
-                 </div>
-                 <div className="space-y-3">
-                     <label className="text-[10px] font-black uppercase text-slate-500 ml-6">Altura (cm)</label>
-                     <input type="number" placeholder="170" className="bg-white/5 border border-white/10 p-5 rounded-[2rem] w-full text-center outline-none focus:border-emerald-500/40 font-black text-lg" value={onboardingHeight} onChange={e => setOnboardingHeight(e.target.value)} />
-                 </div>
-             </div>
-             <button onClick={handleOnboardingSubmit} disabled={!onboardingWeight || !onboardingHeight} className="w-full bg-emerald-500 py-6 rounded-[2.5rem] font-black uppercase tracking-widest active:scale-95 transition-all shadow-xl shadow-emerald-500/10 disabled:opacity-50">COMEÇAR MINHA JORNADA</button>
-           </div>
+        <div className="flex-1 flex flex-col pt-24 px-10 animate-in slide-in-from-right">
+          <h2 className="text-4xl font-black mb-10 tracking-tighter">Como posso te chamar?</h2>
+          <input type="text" placeholder="Nome..." className="bg-white/5 border-2 border-white/5 p-6 rounded-[2rem] text-xl focus:border-emerald-500/50 outline-none" value={userData.name} onChange={(e) => setUserData({...userData, name: e.target.value})} />
+          <button onClick={() => {if(userData.name) setStep(3)}} className="bg-emerald-500 text-white py-6 rounded-[2.5rem] font-black text-lg mt-auto mb-16 uppercase">Continuar</button>
+        </div>
+      )}
+
+      {step === 3 && (
+        <div className="flex-1 flex flex-col pt-20 px-8 pb-10 animate-in slide-in-from-right">
+          <h2 className="text-3xl font-black mb-8 tracking-tighter">Só o básico...</h2>
+          <div className="space-y-6 mb-10">
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-500 uppercase ml-4">Nascimento</label>
+              <input type="date" value={onboardingBirthDate} onChange={(e) => setOnboardingBirthDate(e.target.value)} className="bg-white/5 border-2 border-white/5 p-5 rounded-[1.5rem] w-full outline-none" style={{ colorScheme: 'dark' }} />
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-500 uppercase ml-4">Sexo</label>
+              <div className="flex bg-white/5 p-1 rounded-2xl border-2 border-white/5">
+                {['M', 'F', 'Outro'].map(g => (
+                  <button key={g} onClick={() => setOnboardingGender(g)} className={`flex-1 py-4 text-[10px] font-black rounded-xl ${onboardingGender === g ? 'bg-emerald-500 text-white' : 'text-slate-500'}`}>{g}</button>
+                ))}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-slate-500 uppercase ml-4">Peso (kg)</label>
+                <input type="number" placeholder="70" value={onboardingWeight} onChange={(e) => setOnboardingWeight(e.target.value)} className="bg-white/5 border-2 border-white/5 p-5 rounded-[1.5rem] w-full outline-none text-center" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-slate-500 uppercase ml-4">Altura (cm)</label>
+                <input type="number" placeholder="170" value={onboardingHeight} onChange={(e) => setOnboardingHeight(e.target.value)} className="bg-white/5 border-2 border-white/5 p-5 rounded-[1.5rem] w-full outline-none text-center" />
+              </div>
+            </div>
+          </div>
+          <button onClick={() => { if (onboardingBirthDate && onboardingWeight && onboardingHeight && onboardingGender) setStep(4); }} className="py-6 rounded-[2.5rem] font-black text-lg bg-emerald-500 text-white uppercase">Próximo</button>
+        </div>
+      )}
+
+      {step === 4 && (
+        <div className="flex-1 flex flex-col pt-24 px-10 animate-in slide-in-from-right">
+          <h2 className="text-4xl font-black mb-12 tracking-tighter">O que buscamos?</h2>
+          <div className="space-y-4">
+            {['Emagrecer', 'Manter Saúde', 'Ganhar Músculos'].map(opt => (
+              <button key={opt} onClick={() => { setUserData({...userData, goal: opt}); setStep(4.5); }} className="w-full text-left p-8 rounded-[2rem] bg-white/5 border-2 border-white/5 flex items-center justify-between">
+                <span className="text-lg font-black">{opt}</span>
+                <span className="text-2xl">✨</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {step === 4.5 && (
+        <div className="flex-1 flex flex-col pt-24 px-10 animate-in slide-in-from-right">
+          <h2 className="text-4xl font-black mb-12 tracking-tighter">Sua rotina?</h2>
+          <div className="space-y-4">
+            {[
+              { id: 'sedentario', label: 'Sedentário', factor: 1.2 },
+              { id: 'leve', label: 'Levemente Ativo', factor: 1.375 },
+              { id: 'moderado', label: 'Moderado', factor: 1.55 },
+              { id: 'intenso', label: 'Muito Ativo', factor: 1.725 }
+            ].map(opt => (
+              <button key={opt.id} onClick={() => {
+                const base = userData.goal === 'Emagrecer' ? 22 : userData.goal === 'Ganhar Músculos' ? 35 : 28;
+                const weightNum = parseFloat(onboardingWeight) || 70;
+                const cGoal = Math.round(weightNum * base * opt.factor);
+                const final = { ...userData, weight: onboardingWeight, height: onboardingHeight, gender: onboardingGender, birthDate: onboardingBirthDate, activityLevel: opt.id as any, calorieGoal: cGoal };
+                setUserData(final);
+                localStorage.setItem('nutri_user_data', JSON.stringify(final));
+                setStep(5);
+              }} className="w-full text-left p-6 rounded-[2rem] bg-white/5 border-2 border-white/5">
+                <p className="text-lg font-black">{opt.label}</p>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {step === 5 && (
+        <div className="flex-1 flex flex-col justify-center items-center text-center p-12">
+          <div className="w-48 h-48 border-[6px] border-emerald-500/10 border-t-emerald-500 rounded-full animate-spin mb-10"></div>
+          <h2 className="text-3xl font-black tracking-tighter animate-pulse">Calculando tudo...</h2>
         </div>
       )}
     </div>

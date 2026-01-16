@@ -17,30 +17,13 @@
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(16, 185, 129, 0.2); border-radius: 10px; }
-        
         @keyframes pulse-slow {
-            0%, 100% { transform: scale(1.1); opacity: 0.1; }
-            50% { transform: scale(1.15); opacity: 0.15; }
+            0%, 100% { transform: scale(1.1); }
+            50% { transform: scale(1.15); }
         }
-        .animate-pulse-slow { animation: pulse-slow 15s infinite ease-in-out; }
-        
-        body { 
-            -webkit-tap-highlight-color: transparent; 
-            outline: none; 
-            overscroll-behavior-y: none;
-        }
-        
-        .glass-card {
-            background: rgba(15, 23, 42, 0.6);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.05);
-        }
-
-        .safe-area-bottom {
-            padding-bottom: calc(env(safe-area-inset-bottom, 24px) + 24px);
-        }
-        
-        input, button, textarea { font-family: inherit; }
+        .animate-pulse-slow { animation: pulse-slow 30s infinite ease-in-out; }
+        body { -webkit-tap-highlight-color: transparent; outline: none; }
+        input, button, textarea { -webkit-tap-highlight-color: transparent; }
     </style>
 <script type="importmap">
 {
@@ -49,14 +32,13 @@
     "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
     "react/": "https://esm.sh/react@^19.2.3/",
     "@google/genai": "https://esm.sh/@google/genai@^1.37.0",
-    "firebase/": "https://esm.sh/firebase@^12.8.0/",
     "vite": "https://esm.sh/vite@^7.3.1",
     "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2"
   }
 }
 </script>
 </head>
-<body class="bg-[#020617] text-slate-100 font-sans antialiased overflow-x-hidden">
+<body class="bg-[#020617] text-slate-100 font-sans antialiased">
     <div id="root"></div>
     <script type="module" src="/index.tsx"></script>
 </body>
